@@ -28,6 +28,7 @@ import {
   currentDevinModelIdFromSessionSetup,
   makeDevinAcpRuntime,
   resolveDevinAcpBaseModelId,
+  supportedDevinModelIdsFromSessionSetup,
 } from "../provider/acp/DevinAcpSupport.ts";
 
 const DEVIN_TIMEOUT_MS = 180_000;
@@ -87,6 +88,7 @@ export const makeDevinTextGeneration = Effect.fn("makeDevinTextGeneration")(func
           runtime,
           currentModelId: currentDevinModelIdFromSessionSetup(started.sessionSetupResult),
           requestedModelId: resolvedModel,
+          supportedModelIds: supportedDevinModelIdsFromSessionSetup(started.sessionSetupResult),
           mapError: (cause) =>
             new TextGenerationError({
               operation,
