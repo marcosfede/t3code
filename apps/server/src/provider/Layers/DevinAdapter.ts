@@ -58,6 +58,7 @@ import {
   currentDevinModelIdFromSessionSetup,
   makeDevinAcpRuntime,
   resolveDevinAcpBaseModelId,
+  supportedDevinModelIdsFromSessionSetup,
 } from "../acp/DevinAcpSupport.ts";
 import { type DevinAdapterShape } from "../Services/DevinAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
@@ -110,6 +111,7 @@ interface DevinSessionContext {
    * continues it, and only the last remaining prompt settles the turn. */
   promptsInFlight: number;
   currentModelId: string | undefined;
+  supportedModelIds: ReadonlySet<string> | undefined;
   stopped: boolean;
 }
 
@@ -678,10 +680,14 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
           const requestedStartModelId = devinModelSelection?.model
             ? resolveDevinAcpBaseModelId(devinModelSelection.model)
             : undefined;
+          const supportedModelIds = supportedDevinModelIdsFromSessionSetup(
+            started.sessionSetupResult,
+          );
           const boundModelId = yield* applyDevinAcpModelSelection({
             runtime: acp,
             currentModelId: currentDevinModelIdFromSessionSetup(started.sessionSetupResult),
             requestedModelId: requestedStartModelId,
+            supportedModelIds,
             mapError: (cause) =>
               mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_model", cause),
           });
@@ -718,6 +724,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             interruptedTurnIds: new Set(),
             promptsInFlight: 0,
             currentModelId: boundModelId,
+            supportedModelIds,
             stopped: false,
           };
 
@@ -886,6 +893,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                 runtime: ctx.acp,
                 currentModelId: ctx.currentModelId,
                 requestedModelId: requestedTurnModelId,
+                supportedModelIds: ctx.supportedModelIds,
                 mapError: (cause) =>
                   mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_model", cause),
               });
