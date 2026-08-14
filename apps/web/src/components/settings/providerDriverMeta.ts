@@ -3,6 +3,7 @@ import {
   ClaudeSettings,
   CodexSettings,
   CursorSettings,
+  DevinCloudSettings,
   DevinSettings,
   GrokSettings,
   OpenCodeSettings,
@@ -78,6 +79,13 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
     icon: DevinIcon,
     badgeLabel: "Early Access",
     settingsSchema: DevinSettings,
+  },
+  {
+    value: ProviderDriverKind.make("devinCloud"),
+    label: "Devin Cloud",
+    icon: DevinIcon,
+    badgeLabel: "Early Access",
+    settingsSchema: DevinCloudSettings,
   },
   {
     value: ProviderDriverKind.make("opencode"),

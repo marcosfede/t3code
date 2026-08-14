@@ -117,14 +117,26 @@ describe("supportedDevinModelIdsFromSessionSetup", () => {
 describe("applyDevinAcpModelSelection", () => {
   const makeRecordingRuntime = (failure?: EffectAcpErrors.AcpError) => {
     const modelCalls: Array<string> = [];
+    const configOptionCalls: Array<readonly [string, string | boolean]> = [];
+    const record = (): Effect.Effect<void, EffectAcpErrors.AcpError> =>
+      failure ? Effect.fail(failure) : Effect.void;
     const runtime = {
       setModel: (model: string) =>
-        Effect.gen(function* () {
+        Effect.suspend(() => {
           modelCalls.push(model);
-          if (failure) return yield* failure;
+          return record();
+        }),
+      setConfigOption: (configId: string, value: string | boolean) =>
+        Effect.suspend(() => {
+          configOptionCalls.push([configId, value] as const);
+          return record().pipe(
+            Effect.as({
+              configOptions: [],
+            } satisfies EffectAcpSchema.SetSessionConfigOptionResponse),
+          );
         }),
     };
-    return { runtime, modelCalls };
+    return { runtime, modelCalls, configOptionCalls };
   };
 
   it.effect("sets the model config option when the requested model differs", () =>
@@ -196,6 +208,22 @@ describe("applyDevinAcpModelSelection", () => {
       });
       expect(modelCalls).toEqual(["swe-1-6-fast"]);
       expect(result).toBe("swe-1-6-fast");
+    }),
+  );
+
+  it.effect("routes selection through setConfigOption when a config option id is negotiated", () =>
+    Effect.gen(function* () {
+      const { runtime, modelCalls, configOptionCalls } = makeRecordingRuntime();
+      const result = yield* applyDevinAcpModelSelection({
+        runtime,
+        currentModelId: "devin-2-5",
+        requestedModelId: "devin-ultra",
+        modelConfigOptionId: "devin_version",
+        mapError: (cause) => cause.message,
+      });
+      expect(modelCalls).toEqual([]);
+      expect(configOptionCalls).toEqual([["devin_version", "devin-ultra"]]);
+      expect(result).toBe("devin-ultra");
     }),
   );
 
