@@ -303,6 +303,12 @@ export class AcpSessionRuntime extends Context.Service<
       method: string,
       payload: unknown,
     ) => Effect.Effect<void, EffectAcpErrors.AcpError>;
+    /**
+     * Fails once the underlying transport terminates (process exit or dead
+     * WebSocket). Never succeeds; callers race against it or watch it to tear
+     * down state bound to this runtime.
+     */
+    readonly awaitTermination: Effect.Effect<never, EffectAcpErrors.AcpError>;
   }
 >()("t3/provider/acp/AcpSessionRuntime") {}
 
@@ -371,6 +377,7 @@ export const make = (
     const promptDispatchSemaphore = yield* Semaphore.make(1);
     const activePromptRef = yield* Ref.make<Option.Option<AcpActivePrompt>>(Option.none());
     const sessionLoadGateRef = yield* Ref.make<Option.Option<SessionLoadGate>>(Option.none());
+    const terminationDeferred = yield* Deferred.make<never, EffectAcpErrors.AcpError>();
 
     const ensureConnected = Effect.gen(function* () {
       const error = yield* Ref.get(terminationErrorRef);
@@ -399,6 +406,7 @@ export const make = (
       if (!firstTermination) {
         return;
       }
+      yield* Deferred.fail(terminationDeferred, error);
       yield* closeActiveAssistantSegment({ queue: eventQueue, assistantSegmentRef });
       yield* Queue.offer(eventQueue, { _tag: "ConnectionTerminated", error });
     });
@@ -509,6 +517,7 @@ export const make = (
       const webSocketStdio = yield* connectAcpWebSocketStdio(options.webSocket.url).pipe(
         Effect.provideService(Scope.Scope, runtimeScope),
       );
+      yield* watchTermination(webSocketStdio.terminationError);
       return Layer.effect(
         EffectAcpClient.AcpClient,
         EffectAcpClient.make(
@@ -1118,6 +1127,7 @@ export const make = (
         ),
       notify: (method, payload) =>
         ensureConnected.pipe(Effect.andThen(acp.raw.notify(method, payload))),
+      awaitTermination: Deferred.await(terminationDeferred),
     } satisfies AcpSessionRuntime["Service"];
   });
 
