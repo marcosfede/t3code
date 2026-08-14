@@ -35,6 +35,7 @@ const waitForResumeRelease = process.env.T3_ACP_WAIT_FOR_RESUME_RELEASE === "1";
 const completeFirstPromptOnCancel = process.env.T3_ACP_COMPLETE_FIRST_PROMPT_ON_CANCEL === "1";
 const floodStderr = process.env.T3_ACP_FLOOD_STDERR === "1";
 const hangPromptForever = process.env.T3_ACP_HANG_PROMPT_FOREVER === "1";
+const exitAfterSessionMs = Number(process.env.T3_ACP_EXIT_AFTER_SESSION_MS ?? "0");
 const hangFirstPromptForever = process.env.T3_ACP_HANG_FIRST_PROMPT_FOREVER === "1";
 const emitLateUpdateAfterCancel = process.env.T3_ACP_EMIT_LATE_UPDATE_AFTER_CANCEL === "1";
 const omitXAiPromptCompleteStopReason =
@@ -435,6 +436,9 @@ const program = Effect.gen(function* () {
     Effect.gen(function* () {
       if (antigravityProfile) {
         yield* publishAntigravityCommands(sessionId);
+      }
+      if (exitAfterSessionMs > 0) {
+        setTimeout(() => process.exit(0), exitAfterSessionMs).unref();
       }
       return {
         sessionId,

@@ -223,6 +223,45 @@ it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
     }),
   );
 
+  it.effect("evicts the session when the transport dies while the thread is idle", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-idle-transport-death");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({
+          T3_ACP_EXIT_AFTER_SESSION_MS: "400",
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const sessionExited =
+        yield* Deferred.make<Extract<ProviderRuntimeEvent, { type: "session.exited" }>>();
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.type === "session.exited"
+          ? Deferred.succeed(sessionExited, event).pipe(Effect.ignore)
+          : Effect.void,
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("devin"), model: "default" },
+      });
+
+      const exited = yield* Deferred.await(sessionExited);
+      assert.equal(exited.payload.exitKind, "error");
+      if (exited.payload.exitKind === "error") {
+        assert.isTrue(exited.payload.recoverable);
+      }
+
+      const remaining = yield* adapter.listSessions();
+      assert.isUndefined(remaining.find((session) => session.threadId === threadId));
+
+      yield* Fiber.interrupt(eventsFiber);
+    }),
+  );
+
   it.effect("reports a Devin session running only while the prompt is in flight", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("devin-session-ready-after-prompt");
