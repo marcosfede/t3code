@@ -38,6 +38,7 @@ import {
   type AcpSessionModeState,
   type AcpToolCallState,
 } from "./AcpRuntimeModel.ts";
+import { connectAcpWebSocketStdio } from "./AcpWebSocketStdio.ts";
 
 interface AcpToolCallTrackedState {
   readonly state: AcpToolCallState;
@@ -77,8 +78,17 @@ export interface AcpSpawnInput {
   readonly extendEnv?: boolean;
 }
 
+export interface AcpWebSocketInput {
+  readonly url: string;
+}
+
 export interface AcpSessionRuntimeOptions {
-  readonly spawn: AcpSpawnInput;
+  /** Child-process transport: spawns the agent CLI and speaks ACP over stdio.
+   * Exactly one of `spawn` or `webSocket` must be provided. */
+  readonly spawn?: AcpSpawnInput;
+  /** WebSocket transport: connects to a remote ACP endpoint carrying NDJSON
+   * JSON-RPC frames. Exactly one of `spawn` or `webSocket` must be provided. */
+  readonly webSocket?: AcpWebSocketInput;
   readonly cwd: string;
   readonly resumeSessionId?: string;
   readonly resumeMethod?: "load" | "resume";
@@ -427,66 +437,91 @@ export const make = (
         ),
       );
 
-    const spawnCommand = yield* resolveSpawnCommand(options.spawn.command, options.spawn.args, {
-      ...(options.spawn.env ? { env: options.spawn.env } : {}),
-      extendEnv: options.spawn.extendEnv ?? true,
-    });
-    const child = yield* spawner
-      .spawn(
-        ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-          ...(options.spawn.cwd ? { cwd: options.spawn.cwd } : {}),
-          ...(options.spawn.env ? { env: options.spawn.env } : {}),
-          extendEnv: options.spawn.extendEnv ?? true,
-          shell: spawnCommand.shell,
-        }),
-      )
-      .pipe(
-        Effect.provideService(Scope.Scope, runtimeScope),
-        Effect.mapError(
-          (cause) =>
-            new EffectAcpErrors.AcpSpawnError({
-              command: options.spawn.command,
-              cause,
+    const acpClientOptions = {
+      ...(options.transformStdout ? { transformStdout: options.transformStdout } : {}),
+      ...(options.transformSessionUpdate
+        ? { transformSessionUpdate: options.transformSessionUpdate }
+        : {}),
+      onTermination: recordTermination,
+      ...(options.protocolLogging?.logIncoming !== undefined
+        ? { logIncoming: options.protocolLogging.logIncoming }
+        : {}),
+      ...(options.protocolLogging?.logOutgoing !== undefined
+        ? { logOutgoing: options.protocolLogging.logOutgoing }
+        : {}),
+      ...(options.protocolLogging?.logger ? { logger: options.protocolLogging.logger } : {}),
+    };
+
+    const acpClientLayer = yield* Effect.gen(function* () {
+      const spawn = options.spawn;
+      if (spawn !== undefined) {
+        const spawnCommand = yield* resolveSpawnCommand(spawn.command, spawn.args, {
+          ...(spawn.env ? { env: spawn.env } : {}),
+          extendEnv: spawn.extendEnv ?? true,
+        });
+        const child = yield* spawner
+          .spawn(
+            ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+              ...(spawn.cwd ? { cwd: spawn.cwd } : {}),
+              ...(spawn.env ? { env: spawn.env } : {}),
+              extendEnv: spawn.extendEnv ?? true,
+              shell: spawnCommand.shell,
             }),
+          )
+          .pipe(
+            Effect.provideService(Scope.Scope, runtimeScope),
+            Effect.mapError(
+              (cause) =>
+                new EffectAcpErrors.AcpSpawnError({
+                  command: spawn.command,
+                  cause,
+                }),
+            ),
+          );
+
+        yield* child.stderr.pipe(
+          Stream.decodeText(),
+          Stream.runForEach((chunk) =>
+            (options.onStderr
+              ? options.onStderr(chunk.slice(-maxStderrChunkLength))
+              : Effect.void
+            ).pipe(
+              Effect.catch((error) =>
+                Effect.gen(function* () {
+                  yield* Deferred.fail(stderrFailure, error);
+                  yield* recordTermination(error);
+                  yield* child.kill({ forceKillAfter: "1 second" }).pipe(Effect.ignore);
+                }),
+              ),
+            ),
+          ),
+          Effect.ignore,
+          Effect.forkIn(runtimeScope),
+        );
+
+        return EffectAcpClient.layerChildProcess(child, acpClientOptions);
+      }
+      if (options.webSocket === undefined) {
+        return yield* Effect.die(
+          new Error("AcpSessionRuntime requires exactly one of `spawn` or `webSocket`"),
+        );
+      }
+      const webSocketStdio = yield* connectAcpWebSocketStdio(options.webSocket.url).pipe(
+        Effect.provideService(Scope.Scope, runtimeScope),
+      );
+      return Layer.effect(
+        EffectAcpClient.AcpClient,
+        EffectAcpClient.make(
+          webSocketStdio.stdio,
+          acpClientOptions,
+          webSocketStdio.terminationError,
         ),
       );
+    });
 
-    yield* child.stderr.pipe(
-      Stream.decodeText(),
-      Stream.runForEach((chunk) =>
-        (options.onStderr
-          ? options.onStderr(chunk.slice(-maxStderrChunkLength))
-          : Effect.void
-        ).pipe(
-          Effect.catch((error) =>
-            Effect.gen(function* () {
-              yield* Deferred.fail(stderrFailure, error);
-              yield* recordTermination(error);
-              yield* child.kill({ forceKillAfter: "1 second" }).pipe(Effect.ignore);
-            }),
-          ),
-        ),
-      ),
-      Effect.ignore,
-      Effect.forkIn(runtimeScope),
+    const acpContext = yield* Layer.build(acpClientLayer).pipe(
+      Effect.provideService(Scope.Scope, runtimeScope),
     );
-
-    const acpContext = yield* Layer.build(
-      EffectAcpClient.layerChildProcess(child, {
-        ...(options.transformStdout ? { transformStdout: options.transformStdout } : {}),
-        ...(options.transformSessionUpdate
-          ? { transformSessionUpdate: options.transformSessionUpdate }
-          : {}),
-        onTermination: recordTermination,
-        ...(options.protocolLogging?.logIncoming !== undefined
-          ? { logIncoming: options.protocolLogging.logIncoming }
-          : {}),
-        ...(options.protocolLogging?.logOutgoing !== undefined
-          ? { logOutgoing: options.protocolLogging.logOutgoing }
-          : {}),
-        ...(options.protocolLogging?.logger ? { logger: options.protocolLogging.logger } : {}),
-      }),
-    ).pipe(Effect.provideService(Scope.Scope, runtimeScope));
 
     const acp = yield* Effect.service(EffectAcpClient.AcpClient).pipe(Effect.provide(acpContext));
 

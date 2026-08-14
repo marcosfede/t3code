@@ -5,6 +5,7 @@ import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import type * as EffectAcpErrors from "effect-acp/errors";
+
 import type * as EffectAcpSchema from "effect-acp/schema";
 
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
@@ -13,12 +14,24 @@ type DevinAcpRuntimeDevinSettings = Pick<DevinSettings, "binaryPath">;
 
 interface DevinAcpRuntimeInput extends Omit<
   AcpSessionRuntime.AcpSessionRuntimeOptions,
-  "authMethodId" | "clientCapabilities" | "spawn"
+  "authMethodId" | "clientCapabilities" | "spawn" | "webSocket"
 > {
   readonly childProcessSpawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
   readonly devinSettings: DevinAcpRuntimeDevinSettings | null | undefined;
   readonly environment?: NodeJS.ProcessEnv;
 }
+
+/** Runtime factory input without provider-specific settings; what the shared
+ * Devin adapter passes when it needs an ACP runtime for a session. */
+export type DevinAcpRuntimeFactoryInput = Omit<DevinAcpRuntimeInput, "devinSettings">;
+
+export type DevinAcpRuntimeFactory = (
+  input: DevinAcpRuntimeFactoryInput,
+) => Effect.Effect<
+  AcpSessionRuntime.AcpSessionRuntime["Service"],
+  EffectAcpErrors.AcpError,
+  Crypto.Crypto | Scope.Scope
+>;
 
 export function buildDevinAcpSpawnInput(
   devinSettings: DevinAcpRuntimeDevinSettings | null | undefined,
@@ -68,19 +81,34 @@ export function resolveDevinAcpBaseModelId(model: string | null | undefined): st
   return trimmed && trimmed.length > 0 ? trimmed : undefined;
 }
 
+type DevinSessionSetupResult =
+  | EffectAcpSchema.LoadSessionResponse
+  | EffectAcpSchema.NewSessionResponse
+  | EffectAcpSchema.ResumeSessionResponse;
+
+/** The negotiated model select option. Local Devin sessions advertise it as
+ * `model`; cloud sessions advertise it as `devin_version`. */
+export function findDevinModelConfigOption(sessionSetupResult: DevinSessionSetupResult) {
+  return sessionSetupResult.configOptions?.find(
+    (option) =>
+      option.category === "model" || option.id === "model" || option.id === "devin_version",
+  );
+}
+
+export function devinModelConfigOptionIdFromSessionSetup(
+  sessionSetupResult: DevinSessionSetupResult,
+): string | undefined {
+  return findDevinModelConfigOption(sessionSetupResult)?.id;
+}
+
 export function currentDevinModelIdFromSessionSetup(
-  sessionSetupResult:
-    | EffectAcpSchema.LoadSessionResponse
-    | EffectAcpSchema.NewSessionResponse
-    | EffectAcpSchema.ResumeSessionResponse,
+  sessionSetupResult: DevinSessionSetupResult,
 ): string | undefined {
   const fromModels = sessionSetupResult.models?.currentModelId?.trim();
   if (fromModels) {
     return fromModels;
   }
-  const modelOption = sessionSetupResult.configOptions?.find(
-    (option) => option.category === "model" || option.id === "model",
-  );
+  const modelOption = findDevinModelConfigOption(sessionSetupResult);
   if (!modelOption || modelOption.type !== "select") {
     return undefined;
   }
@@ -95,14 +123,9 @@ export function currentDevinModelIdFromSessionSetup(
  * option, meaning acceptance is unknown rather than empty.
  */
 export function supportedDevinModelIdsFromSessionSetup(
-  sessionSetupResult:
-    | EffectAcpSchema.LoadSessionResponse
-    | EffectAcpSchema.NewSessionResponse
-    | EffectAcpSchema.ResumeSessionResponse,
+  sessionSetupResult: DevinSessionSetupResult,
 ): ReadonlySet<string> | undefined {
-  const modelOption = sessionSetupResult.configOptions?.find(
-    (option) => option.category === "model" || option.id === "model",
-  );
+  const modelOption = findDevinModelConfigOption(sessionSetupResult);
   if (!modelOption || modelOption.type !== "select") {
     return undefined;
   }
@@ -127,10 +150,17 @@ export function supportedDevinModelIdsFromSessionSetup(
  * models), keeps the session's current model instead of failing the turn.
  */
 export function applyDevinAcpModelSelection<E>(input: {
-  readonly runtime: Pick<AcpSessionRuntime.AcpSessionRuntime["Service"], "setModel">;
+  readonly runtime: Pick<
+    AcpSessionRuntime.AcpSessionRuntime["Service"],
+    "setModel" | "setConfigOption"
+  >;
   readonly currentModelId: string | undefined;
   readonly requestedModelId: string | undefined;
   readonly supportedModelIds?: ReadonlySet<string> | undefined;
+  /** Negotiated model config option id; when set, selection goes through
+   * `session/set_config_option` with this id (cloud sessions use
+   * `devin_version` rather than `model`). */
+  readonly modelConfigOptionId?: string | undefined;
   readonly mapError: (cause: EffectAcpErrors.AcpError) => E;
 }): Effect.Effect<string | undefined, E> {
   const requestedIsSupported =
@@ -143,7 +173,11 @@ export function applyDevinAcpModelSelection<E>(input: {
   if (!shouldSwitchModel) {
     return Effect.succeed(input.currentModelId);
   }
-  return input.runtime
-    .setModel(input.requestedModelId)
-    .pipe(Effect.mapError(input.mapError), Effect.as(input.requestedModelId));
+  const applySelection =
+    input.modelConfigOptionId !== undefined
+      ? Effect.asVoid(
+          input.runtime.setConfigOption(input.modelConfigOptionId, input.requestedModelId),
+        )
+      : input.runtime.setModel(input.requestedModelId);
+  return applySelection.pipe(Effect.mapError(input.mapError), Effect.as(input.requestedModelId));
 }

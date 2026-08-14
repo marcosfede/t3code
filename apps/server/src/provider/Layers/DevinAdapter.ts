@@ -56,9 +56,11 @@ import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
 import {
   applyDevinAcpModelSelection,
   currentDevinModelIdFromSessionSetup,
+  devinModelConfigOptionIdFromSessionSetup,
   makeDevinAcpRuntime,
   resolveDevinAcpBaseModelId,
   supportedDevinModelIdsFromSessionSetup,
+  type DevinAcpRuntimeFactory,
 } from "../acp/DevinAcpSupport.ts";
 import { type DevinAdapterShape } from "../Services/DevinAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
@@ -78,6 +80,11 @@ export interface DevinAdapterLiveOptions {
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
   readonly instanceId?: ProviderInstanceId;
+  /** Driver kind stamped on sessions and errors; defaults to local `devin`. */
+  readonly provider?: ProviderDriverKind;
+  /** ACP runtime factory; defaults to spawning the local `devin acp` CLI.
+   * Devin Cloud passes a WebSocket-backed factory here. */
+  readonly makeAcpRuntime?: DevinAcpRuntimeFactory;
 }
 
 interface PendingApproval {
@@ -98,6 +105,7 @@ interface DevinSessionContext {
   session: ProviderSession;
   readonly scope: Scope.Closeable;
   readonly acp: AcpSessionRuntime.AcpSessionRuntime["Service"];
+  readonly modelConfigOptionId: string | undefined;
   notificationFiber: Fiber.Fiber<void, never> | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
@@ -220,9 +228,16 @@ export function devinPromptSettlementBelongsToContext(input: {
   );
 }
 
-export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAdapterLiveOptions) {
+export function makeDevinAdapter(
+  devinSettings: DevinSettings | null,
+  options?: DevinAdapterLiveOptions,
+) {
   return Effect.gen(function* () {
     const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("devin");
+    const provider = options?.provider ?? PROVIDER;
+    const makeAcpRuntime: DevinAcpRuntimeFactory =
+      options?.makeAcpRuntime ??
+      ((runtimeInput) => makeDevinAcpRuntime({ ...runtimeInput, devinSettings }));
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -246,7 +261,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
       Effect.mapError(
         (cause) =>
           new ProviderAdapterRequestError({
-            provider: PROVIDER,
+            provider: provider,
             method: "crypto/randomUUIDv4",
             detail: "Failed to generate Devin runtime identifier.",
             cause,
@@ -329,7 +344,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
               yield* offerRuntimeEvent({
                 type: "turn.completed",
                 ...(yield* makeEventStamp()),
-                provider: PROVIDER,
+                provider: provider,
                 threadId,
                 turnId,
                 payload: {
@@ -341,7 +356,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
               yield* offerRuntimeEvent({
                 type: "turn.completed",
                 ...(yield* makeEventStamp()),
-                provider: PROVIDER,
+                provider: provider,
                 threadId,
                 turnId,
                 payload: {
@@ -405,7 +420,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
           yield* offerRuntimeEvent({
             type: "turn.completed",
             ...(yield* makeEventStamp()),
-            provider: PROVIDER,
+            provider: provider,
             threadId,
             turnId: settleTurnId,
             payload: {
@@ -417,7 +432,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
           yield* offerRuntimeEvent({
             type: "turn.completed",
             ...(yield* makeEventStamp()),
-            provider: PROVIDER,
+            provider: provider,
             threadId,
             turnId: settleTurnId,
             payload: {
@@ -438,7 +453,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             event: {
               id: yield* randomUUIDv4,
               kind: "notification",
-              provider: PROVIDER,
+              provider: provider,
               createdAt: observedAt,
               method,
               threadId,
@@ -480,7 +495,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
         yield* offerRuntimeEvent(
           makeAcpPlanUpdatedEvent({
             stamp,
-            provider: PROVIDER,
+            provider: provider,
             threadId: ctx.threadId,
             turnId,
             payload,
@@ -497,7 +512,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
       const ctx = sessions.get(threadId);
       if (!ctx || ctx.stopped) {
         return Effect.fail(
-          new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId }),
+          new ProviderAdapterSessionNotFoundError({ provider: provider, threadId }),
         );
       }
       return Effect.succeed(ctx);
@@ -517,7 +532,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
         yield* offerRuntimeEvent({
           type: "session.exited",
           ...(yield* makeEventStamp()),
-          provider: PROVIDER,
+          provider: provider,
           threadId: ctx.threadId,
           payload: { exitKind: "graceful" },
         });
@@ -527,16 +542,16 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
       withThreadLock(
         input.threadId,
         Effect.gen(function* () {
-          if (input.provider !== undefined && input.provider !== PROVIDER) {
+          if (input.provider !== undefined && input.provider !== provider) {
             return yield* new ProviderAdapterValidationError({
-              provider: PROVIDER,
+              provider: provider,
               operation: "startSession",
-              issue: `Expected provider '${PROVIDER}' but received '${input.provider}'.`,
+              issue: `Expected provider '${provider}' but received '${input.provider}'.`,
             });
           }
           if (!input.cwd?.trim()) {
             return yield* new ProviderAdapterValidationError({
-              provider: PROVIDER,
+              provider: provider,
               operation: "startSession",
               issue: "cwd is required and must be non-empty.",
             });
@@ -561,13 +576,12 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
           const resumeSessionId = parseDevinResume(input.resumeCursor)?.sessionId;
           const acpNativeLoggers = makeAcpNativeLoggers({
             nativeEventLogger,
-            provider: PROVIDER,
+            provider: provider,
             threadId: input.threadId,
           });
 
           const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
-          const acp = yield* makeDevinAcpRuntime({
-            devinSettings,
+          const acp = yield* makeAcpRuntime({
             ...(options?.environment ? { environment: options.environment } : {}),
             childProcessSpawner,
             cwd,
@@ -597,7 +611,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             Effect.mapError(
               (cause) =>
                 new ProviderAdapterProcessError({
-                  provider: PROVIDER,
+                  provider: provider,
                   threadId: input.threadId,
                   detail: cause.message,
                   cause,
@@ -629,7 +643,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                   yield* offerRuntimeEvent(
                     makeAcpRequestOpenedEvent({
                       stamp: yield* makeEventStamp(),
-                      provider: PROVIDER,
+                      provider: provider,
                       threadId: input.threadId,
                       turnId,
                       requestId: runtimeRequestId,
@@ -649,7 +663,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                   yield* offerRuntimeEvent(
                     makeAcpRequestResolvedEvent({
                       stamp: yield* makeEventStamp(),
-                      provider: PROVIDER,
+                      provider: provider,
                       threadId: input.threadId,
                       turnId,
                       requestId: runtimeRequestId,
@@ -673,7 +687,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             return yield* acp.start();
           }).pipe(
             Effect.mapError((error) =>
-              mapAcpToAdapterError(PROVIDER, input.threadId, "session/start", error),
+              mapAcpToAdapterError(provider, input.threadId, "session/start", error),
             ),
           );
 
@@ -683,18 +697,22 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
           const supportedModelIds = supportedDevinModelIdsFromSessionSetup(
             started.sessionSetupResult,
           );
+          const modelConfigOptionId = devinModelConfigOptionIdFromSessionSetup(
+            started.sessionSetupResult,
+          );
           const boundModelId = yield* applyDevinAcpModelSelection({
             runtime: acp,
             currentModelId: currentDevinModelIdFromSessionSetup(started.sessionSetupResult),
             requestedModelId: requestedStartModelId,
             supportedModelIds,
+            modelConfigOptionId,
             mapError: (cause) =>
-              mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_model", cause),
+              mapAcpToAdapterError(provider, input.threadId, "session/set_model", cause),
           });
 
           const now = yield* nowIso;
           const session: ProviderSession = {
-            provider: PROVIDER,
+            provider: provider,
             providerInstanceId: boundInstanceId,
             status: "ready",
             runtimeMode: input.runtimeMode,
@@ -715,6 +733,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             session,
             scope: sessionScope,
             acp,
+            modelConfigOptionId,
             notificationFiber: undefined,
             pendingApprovals,
             pendingUserInputs,
@@ -761,7 +780,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                     yield* offerRuntimeEvent(
                       makeAcpAssistantItemEvent({
                         stamp,
-                        provider: PROVIDER,
+                        provider: provider,
                         threadId: ctx.threadId,
                         turnId: notificationTurnId,
                         itemId: event.itemId,
@@ -773,7 +792,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                     yield* offerRuntimeEvent(
                       makeAcpAssistantItemEvent({
                         stamp,
-                        provider: PROVIDER,
+                        provider: provider,
                         threadId: ctx.threadId,
                         turnId: notificationTurnId,
                         itemId: event.itemId,
@@ -795,7 +814,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                     yield* offerRuntimeEvent(
                       makeAcpToolCallEvent({
                         stamp,
-                        provider: PROVIDER,
+                        provider: provider,
                         threadId: ctx.threadId,
                         turnId: notificationTurnId,
                         toolCall: event.toolCall,
@@ -807,7 +826,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                     yield* offerRuntimeEvent(
                       makeAcpContentDeltaEvent({
                         stamp,
-                        provider: PROVIDER,
+                        provider: provider,
                         threadId: ctx.threadId,
                         turnId: notificationTurnId,
                         ...(event.itemId ? { itemId: event.itemId } : {}),
@@ -833,21 +852,21 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
           yield* offerRuntimeEvent({
             type: "session.started",
             ...(yield* makeEventStamp()),
-            provider: PROVIDER,
+            provider: provider,
             threadId: input.threadId,
             payload: { resume: started.initializeResult },
           });
           yield* offerRuntimeEvent({
             type: "session.state.changed",
             ...(yield* makeEventStamp()),
-            provider: PROVIDER,
+            provider: provider,
             threadId: input.threadId,
             payload: { state: "ready", reason: "Devin ACP session ready" },
           });
           yield* offerRuntimeEvent({
             type: "thread.started",
             ...(yield* makeEventStamp()),
-            provider: PROVIDER,
+            provider: provider,
             threadId: input.threadId,
             payload: { providerThreadId: started.sessionId },
           });
@@ -894,8 +913,9 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                 currentModelId: ctx.currentModelId,
                 requestedModelId: requestedTurnModelId,
                 supportedModelIds: ctx.supportedModelIds,
+                modelConfigOptionId: ctx.modelConfigOptionId,
                 mapError: (cause) =>
-                  mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_model", cause),
+                  mapAcpToAdapterError(provider, input.threadId, "session/set_model", cause),
               });
 
               const text = input.input?.trim();
@@ -909,7 +929,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                     });
                     if (!attachmentPath) {
                       return yield* new ProviderAdapterRequestError({
-                        provider: PROVIDER,
+                        provider: provider,
                         method: "session/prompt",
                         detail: `Invalid attachment id '${attachment.id}'.`,
                       });
@@ -918,7 +938,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                       Effect.mapError(
                         (cause) =>
                           new ProviderAdapterRequestError({
-                            provider: PROVIDER,
+                            provider: provider,
                             method: "session/prompt",
                             detail: cause.message,
                             cause,
@@ -939,7 +959,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
 
               if (promptParts.length === 0) {
                 return yield* new ProviderAdapterValidationError({
-                  provider: PROVIDER,
+                  provider: provider,
                   operation: "sendTurn",
                   issue: "Turn requires non-empty text or attachments.",
                 });
@@ -957,7 +977,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                   settleAllPrompts: true,
                 });
                 return yield* new ProviderAdapterRequestError({
-                  provider: PROVIDER,
+                  provider: provider,
                   method: "session/prompt",
                   detail: "Devin prompt was interrupted during preparation.",
                 });
@@ -977,7 +997,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                 yield* offerRuntimeEvent({
                   type: "turn.started",
                   ...(yield* makeEventStamp()),
-                  provider: PROVIDER,
+                  provider: provider,
                   threadId: input.threadId,
                   turnId,
                   payload: displayModel ? { model: displayModel } : {},
@@ -1030,11 +1050,11 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
               Effect.tapError((error) =>
                 Ref.set(
                   promptFailureMessageRef,
-                  mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error).message,
+                  mapAcpToAdapterError(provider, input.threadId, "session/prompt", error).message,
                 ).pipe(Effect.andThen(prepared.acp.drainEvents)),
               ),
               Effect.mapError((error) =>
-                mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
+                mapAcpToAdapterError(provider, input.threadId, "session/prompt", error),
               ),
             );
 
@@ -1054,7 +1074,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                 );
                 yield* Ref.set(promptSettled, true);
                 return yield* new ProviderAdapterRequestError({
-                  provider: PROVIDER,
+                  provider: provider,
                   method: "session/prompt",
                   detail: "Devin session changed before the turn completed.",
                 });
@@ -1128,7 +1148,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                 yield* offerRuntimeEvent({
                   type: "turn.completed",
                   ...(yield* makeEventStamp()),
-                  provider: PROVIDER,
+                  provider: provider,
                   threadId: input.threadId,
                   turnId: prepared.turnId,
                   payload: {
@@ -1272,7 +1292,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             yield* Effect.ignore(
               ctx.acp.cancel.pipe(
                 Effect.mapError((error) =>
-                  mapAcpToAdapterError(PROVIDER, threadId, "session/cancel", error),
+                  mapAcpToAdapterError(provider, threadId, "session/cancel", error),
                 ),
               ),
             );
@@ -1311,7 +1331,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
         const pending = ctx.pendingApprovals.get(requestId);
         if (!pending) {
           return yield* new ProviderAdapterRequestError({
-            provider: PROVIDER,
+            provider: provider,
             method: "session/request_permission",
             detail: `Unknown pending approval request: ${requestId}`,
           });
@@ -1329,7 +1349,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
         const pending = ctx.pendingUserInputs.get(requestId);
         if (!pending) {
           return yield* new ProviderAdapterRequestError({
-            provider: PROVIDER,
+            provider: provider,
             method: "session/user_input",
             detail: `Unknown pending user-input request: ${requestId}`,
           });
@@ -1348,13 +1368,13 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
         yield* requireSession(threadId);
         if (!Number.isInteger(numTurns) || numTurns < 1) {
           return yield* new ProviderAdapterValidationError({
-            provider: PROVIDER,
+            provider: provider,
             operation: "rollbackThread",
             issue: "numTurns must be an integer >= 1.",
           });
         }
         return yield* new ProviderAdapterRequestError({
-          provider: PROVIDER,
+          provider: provider,
           method: "thread/rollback",
           detail: "Devin ACP sessions do not support provider-side rollback yet.",
         });
@@ -1391,7 +1411,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
     const streamEvents = Stream.fromPubSub(runtimeEventPubSub);
 
     return {
-      provider: PROVIDER,
+      provider: provider,
       capabilities: { sessionModelSwitch: "in-session" },
       startSession,
       sendTurn,

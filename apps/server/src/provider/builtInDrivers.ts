@@ -23,6 +23,7 @@
 import { ClaudeDriver, type ClaudeDriverEnv } from "./Drivers/ClaudeDriver.ts";
 import { CodexDriver, type CodexDriverEnv } from "./Drivers/CodexDriver.ts";
 import { CursorDriver, type CursorDriverEnv } from "./Drivers/CursorDriver.ts";
+import { DevinCloudDriver, type DevinCloudDriverEnv } from "./Drivers/DevinCloudDriver.ts";
 import { DevinDriver, type DevinDriverEnv } from "./Drivers/DevinDriver.ts";
 import { GrokDriver, type GrokDriverEnv } from "./Drivers/GrokDriver.ts";
 import { OpenCodeDriver, type OpenCodeDriverEnv } from "./Drivers/OpenCodeDriver.ts";
@@ -38,6 +39,7 @@ export type BuiltInDriversEnv =
   | ClaudeDriverEnv
   | CodexDriverEnv
   | CursorDriverEnv
+  | DevinCloudDriverEnv
   | DevinDriverEnv
   | GrokDriverEnv
   | OpenCodeDriverEnv
@@ -54,6 +56,7 @@ export const BUILT_IN_DRIVERS: ReadonlyArray<AnyProviderDriver<BuiltInDriversEnv
   CursorDriver,
   GrokDriver,
   DevinDriver,
+  DevinCloudDriver,
   OpenCodeDriver,
   AntigravityDriver,
 ];
