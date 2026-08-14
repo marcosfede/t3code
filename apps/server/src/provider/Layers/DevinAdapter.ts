@@ -9,6 +9,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   RuntimeRequestId,
+  type SessionExitedPayload,
   type ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -175,6 +176,22 @@ const resolveSessionCallbackTurnId = (
   const ctx = sessions.get(threadId);
   return ctx ? resolveCallbackTurnId(ctx) : undefined;
 };
+
+/** ACP failures that mean the transport itself is gone (dead WebSocket or
+ * exited process), as opposed to an agent-level error response on a live
+ * connection. The session context must be dropped so the next turn
+ * reconnects instead of reusing the dead transport. */
+export function isAcpConnectionLostError(error: EffectAcpErrors.AcpError): boolean {
+  switch (error._tag) {
+    case "AcpSpawnError":
+    case "AcpProcessExitedError":
+    case "AcpTransportError":
+    case "AcpInputStreamEndedError":
+      return true;
+    default:
+      return false;
+  }
+}
 
 function parseDevinResume(raw: unknown): { sessionId: string } | undefined {
   if (!isRecord(raw)) return undefined;
@@ -518,7 +535,10 @@ export function makeDevinAdapter(
       return Effect.succeed(ctx);
     };
 
-    const stopSessionInternal = (ctx: DevinSessionContext) =>
+    const stopSessionInternal = (
+      ctx: DevinSessionContext,
+      exit: SessionExitedPayload = { exitKind: "graceful" },
+    ) =>
       Effect.gen(function* () {
         if (ctx.stopped) return;
         ctx.stopped = true;
@@ -534,7 +554,7 @@ export function makeDevinAdapter(
           ...(yield* makeEventStamp()),
           provider: provider,
           threadId: ctx.threadId,
-          payload: { exitKind: "graceful" },
+          payload: exit,
         });
       });
 
@@ -1034,6 +1054,7 @@ export function makeDevinAdapter(
         );
 
         const promptFailureMessageRef = yield* Ref.make<string | undefined>(undefined);
+        const promptConnectionLostRef = yield* Ref.make(false);
 
         return yield* Effect.gen(function* () {
           const result = yield* prepared.acp
@@ -1048,10 +1069,13 @@ export function makeDevinAdapter(
                 ]),
               ),
               Effect.tapError((error) =>
-                Ref.set(
-                  promptFailureMessageRef,
-                  mapAcpToAdapterError(provider, input.threadId, "session/prompt", error).message,
-                ).pipe(Effect.andThen(prepared.acp.drainEvents)),
+                Effect.all([
+                  Ref.set(
+                    promptFailureMessageRef,
+                    mapAcpToAdapterError(provider, input.threadId, "session/prompt", error).message,
+                  ),
+                  Ref.set(promptConnectionLostRef, isAcpConnectionLostError(error)),
+                ]).pipe(Effect.andThen(prepared.acp.drainEvents)),
               ),
               Effect.mapError((error) =>
                 mapAcpToAdapterError(provider, input.threadId, "session/prompt", error),
@@ -1227,10 +1251,29 @@ export function makeDevinAdapter(
               }
 
               const errorMessage = yield* Ref.get(promptFailureMessageRef);
+              const connectionLost = yield* Ref.get(promptConnectionLostRef);
               yield* withThreadLock(
                 input.threadId,
-                settlePromptInFlight(input.threadId, prepared.turnId, prepared.acpSessionId, {
-                  errorMessage: errorMessage ?? "Devin prompt request failed.",
+                Effect.gen(function* () {
+                  yield* settlePromptInFlight(
+                    input.threadId,
+                    prepared.turnId,
+                    prepared.acpSessionId,
+                    {
+                      errorMessage: errorMessage ?? "Devin prompt request failed.",
+                      ...(connectionLost ? { settleAllPrompts: true } : {}),
+                    },
+                  );
+                  if (connectionLost) {
+                    const ctx = sessions.get(input.threadId);
+                    if (ctx && !ctx.stopped && ctx.acpSessionId === prepared.acpSessionId) {
+                      yield* stopSessionInternal(ctx, {
+                        reason: "Devin connection lost.",
+                        recoverable: true,
+                        exitKind: "error",
+                      });
+                    }
+                  }
                 }),
               );
             }).pipe(Effect.catch(() => Effect.void)),
@@ -1399,7 +1442,9 @@ export function makeDevinAdapter(
       });
 
     const stopAll: DevinAdapterShape["stopAll"] = () =>
-      Effect.forEach(Array.from(sessions.values()), stopSessionInternal, { discard: true });
+      Effect.forEach(Array.from(sessions.values()), (ctx) => stopSessionInternal(ctx), {
+        discard: true,
+      });
 
     yield* Effect.addFinalizer(() =>
       Effect.ignore(stopAll()).pipe(
