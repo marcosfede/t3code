@@ -1,0 +1,76 @@
+name: Sync upstream
+
+# Keeps this fork in sync with pingdotgg/t3code:
+#  - fast-forwards `main` to upstream/main (pristine mirror, never diverges)
+#  - rebases `devin-integration` (this fork's changes) onto the new main
+# Runs daily and on demand. If the rebase hits a conflict it opens an issue
+# instead of pushing, so a human (or Devin) can resolve it.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: devin-integration
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fast-forward main to upstream
+        run: |
+          git remote add upstream https://github.com/pingdotgg/t3code.git
+          git fetch upstream main
+          git push origin upstream/main:refs/heads/main
+
+      - name: Rebase devin-integration onto main
+        id: rebase
+        run: |
+          if git rebase upstream/main; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            git rebase --abort
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push rebased branch
+        if: steps.rebase.outputs.conflict == 'false'
+        run: git push --force-with-lease origin devin-integration
+
+      - name: Open conflict issue
+        if: steps.rebase.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Upstream sync conflict: devin-integration needs a manual rebase"
+          existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')
+          if [ -z "$existing" ]; then
+            {
+              echo 'The scheduled upstream sync fast-forwarded `main` but could not cleanly rebase `devin-integration` onto it. Rebase manually:'
+              echo
+              echo '```bash'
+              echo 'git fetch origin'
+              echo 'git checkout devin-integration'
+              echo 'git rebase origin/main'
+              echo '# resolve conflicts'
+              echo 'git push --force-with-lease origin devin-integration'
+              echo '```'
+            } > /tmp/issue-body.md
+            gh issue create --title "$title" --body-file /tmp/issue-body.md
+          fi
