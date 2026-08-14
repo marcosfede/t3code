@@ -2,7 +2,7 @@ name: Sync upstream
 
 # Keeps this fork in sync with pingdotgg/t3code:
 #  - fast-forwards `main` to upstream/main (pristine mirror, never diverges)
-#  - rebases `devin-integration` (this fork's changes) onto the new main
+#  - rebases `devin` (this fork's changes) onto the new main
 # Runs daily and on demand. If the rebase hits a conflict it opens an issue
 # instead of pushing, so a human (or Devin) can resolve it.
 
@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: devin-integration
+          ref: devin
           fetch-depth: 0
 
       - name: Configure git
@@ -39,7 +39,7 @@ jobs:
           git fetch upstream main
           git push origin upstream/main:refs/heads/main
 
-      - name: Rebase devin-integration onto main
+      - name: Rebase devin onto main
         id: rebase
         run: |
           if git rebase upstream/main; then
@@ -51,25 +51,25 @@ jobs:
 
       - name: Push rebased branch
         if: steps.rebase.outputs.conflict == 'false'
-        run: git push --force-with-lease origin devin-integration
+        run: git push --force-with-lease origin devin
 
       - name: Open conflict issue
         if: steps.rebase.outputs.conflict == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          title="Upstream sync conflict: devin-integration needs a manual rebase"
+          title="Upstream sync conflict: devin needs a manual rebase"
           existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')
           if [ -z "$existing" ]; then
             {
-              echo 'The scheduled upstream sync fast-forwarded `main` but could not cleanly rebase `devin-integration` onto it. Rebase manually:'
+              echo 'The scheduled upstream sync fast-forwarded `main` but could not cleanly rebase `devin` onto it. Rebase manually:'
               echo
               echo '```bash'
               echo 'git fetch origin'
-              echo 'git checkout devin-integration'
+              echo 'git checkout devin'
               echo 'git rebase origin/main'
               echo '# resolve conflicts'
-              echo 'git push --force-with-lease origin devin-integration'
+              echo 'git push --force-with-lease origin devin'
               echo '```'
             } > /tmp/issue-body.md
             gh issue create --title "$title" --body-file /tmp/issue-body.md
