@@ -14,6 +14,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import * as EffectAcpErrors from "effect-acp/errors";
 
 import {
   ApprovalRequestId,
@@ -26,7 +27,11 @@ import {
 } from "@t3tools/contracts";
 
 import { ServerConfig } from "../../config.ts";
-import { devinPromptSettlementBelongsToContext, makeDevinAdapter } from "./DevinAdapter.ts";
+import {
+  devinPromptSettlementBelongsToContext,
+  isAcpConnectionLostError,
+  makeDevinAdapter,
+} from "./DevinAdapter.ts";
 const decodeDevinSettings = Schema.decodeSync(DevinSettings);
 
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
@@ -872,5 +877,22 @@ it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
       yield* Fiber.interrupt(eventsFiber);
       yield* adapter.stopSession(threadId);
     }),
+  );
+});
+
+it("classifies transport-level ACP failures as connection lost", () => {
+  assert.isTrue(
+    isAcpConnectionLostError(new EffectAcpErrors.AcpProcessExitedError({ code: 1006 })),
+  );
+  assert.isTrue(
+    isAcpConnectionLostError(
+      new EffectAcpErrors.AcpTransportError({ operation: "call-rpc", cause: new Error("dead") }),
+    ),
+  );
+  assert.isTrue(isAcpConnectionLostError(new EffectAcpErrors.AcpInputStreamEndedError({})));
+  assert.isFalse(
+    isAcpConnectionLostError(
+      new EffectAcpErrors.AcpRequestError({ code: -32000, errorMessage: "quota exceeded" }),
+    ),
   );
 });
