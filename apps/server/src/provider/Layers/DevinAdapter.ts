@@ -108,6 +108,7 @@ interface DevinSessionContext {
   readonly acp: AcpSessionRuntime.AcpSessionRuntime["Service"];
   readonly modelConfigOptionId: string | undefined;
   notificationFiber: Fiber.Fiber<void, never> | undefined;
+  terminationWatchFiber: Fiber.Fiber<void, never> | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
   turns: Array<{ id: TurnId; items: Array<unknown> }>;
@@ -547,6 +548,9 @@ export function makeDevinAdapter(
         if (ctx.notificationFiber) {
           yield* Fiber.interrupt(ctx.notificationFiber);
         }
+        if (ctx.terminationWatchFiber) {
+          yield* Fiber.interrupt(ctx.terminationWatchFiber);
+        }
         yield* Effect.ignore(Scope.close(ctx.scope, Exit.void));
         sessions.delete(ctx.threadId);
         yield* offerRuntimeEvent({
@@ -755,6 +759,7 @@ export function makeDevinAdapter(
             acp,
             modelConfigOptionId,
             notificationFiber: undefined,
+            terminationWatchFiber: undefined,
             pendingApprovals,
             pendingUserInputs,
             turns: [],
@@ -866,6 +871,38 @@ export function makeDevinAdapter(
           );
 
           ctx.notificationFiber = nf;
+
+          // A transport that dies while the thread is idle must not leave a
+          // dead session context behind: the next turn would reuse it and
+          // hang. Turns in flight settle through the prompt failure path
+          // instead, which also drops the context.
+          ctx.terminationWatchFiber = yield* acp.awaitTermination.pipe(
+            Effect.flip,
+            Effect.flatMap((error) =>
+              withThreadLock(
+                input.threadId,
+                Effect.gen(function* () {
+                  const live = sessions.get(input.threadId);
+                  if (
+                    !live ||
+                    live.stopped ||
+                    live.acpSessionId !== started.sessionId ||
+                    live.promptsInFlight > 0
+                  ) {
+                    return;
+                  }
+                  live.terminationWatchFiber = undefined;
+                  yield* stopSessionInternal(live, {
+                    reason: error.message.trim() || "Devin connection lost.",
+                    recoverable: true,
+                    exitKind: "error",
+                  });
+                }),
+              ),
+            ),
+            Effect.catch(() => Effect.void),
+            Effect.forkChild,
+          );
           sessions.set(input.threadId, ctx);
           sessionScopeTransferred = true;
 
