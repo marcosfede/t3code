@@ -438,7 +438,9 @@ const program = Effect.gen(function* () {
         yield* publishAntigravityCommands(sessionId);
       }
       if (exitAfterSessionMs > 0) {
-        setTimeout(() => process.exit(0), exitAfterSessionMs).unref();
+        Effect.runFork(
+          Effect.sleep(exitAfterSessionMs).pipe(Effect.andThen(Effect.sync(() => process.exit(0)))),
+        );
       }
       return {
         sessionId,
