@@ -18,6 +18,7 @@ on:
 permissions:
   contents: write
   issues: write
+  actions: write
 
 concurrency:
   group: sync-upstream
@@ -37,6 +38,25 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # The fork mirrors upstream's workflow *files* but must not *run* them:
+      # they are upstream's releases, deploys, and PR automation. Anything not
+      # on the allowlist is disabled, so workflows newly added upstream arrive
+      # disabled instead of running nightly schedules or deploys here.
+      - name: Disable inherited upstream workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          keep='ci.yml release-fork.yml sync-upstream.yml'
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows" --paginate \
+            --jq '.workflows[] | select(.state == "active") | .path' |
+          while read -r path; do
+            case "$path" in .github/workflows/*) ;; *) continue ;; esac
+            name=$(basename "$path")
+            case " $keep " in *" $name "*) continue ;; esac
+            gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/$name/disable"
+            echo "disabled $name"
+          done
 
       - name: Fast-forward main to upstream
         run: |
