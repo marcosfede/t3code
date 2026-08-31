@@ -5,6 +5,10 @@ name: Sync upstream
 #  - rebases `devin` (this fork's changes) onto the new main
 # Runs daily and on demand. If the rebase hits a conflict it opens an issue
 # instead of pushing, so a human (or Devin) can resolve it.
+#
+# Requires the SYNC_UPSTREAM_TOKEN repo secret: a PAT with contents+workflows
+# write access. The default GITHUB_TOKEN cannot push commits that touch
+# .github/workflows/, so upstream workflow changes would fail the sync.
 
 on:
   schedule:
@@ -27,6 +31,7 @@ jobs:
         with:
           ref: devin
           fetch-depth: 0
+          token: ${{ secrets.SYNC_UPSTREAM_TOKEN || github.token }}
 
       - name: Configure git
         run: |
@@ -53,24 +58,27 @@ jobs:
         if: steps.rebase.outputs.conflict == 'false'
         run: git push --force-with-lease origin devin
 
-      - name: Open conflict issue
+      - name: Report conflict
         if: steps.rebase.outputs.conflict == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           title="Upstream sync conflict: devin needs a manual rebase"
-          existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')
+          {
+            echo 'The scheduled upstream sync fast-forwarded `main` but could not cleanly rebase `devin` onto it. Rebase manually:'
+            echo
+            echo '```bash'
+            echo 'git fetch origin'
+            echo 'git checkout devin'
+            echo 'git rebase origin/main'
+            echo '# resolve conflicts'
+            echo 'git push --force-with-lease origin devin'
+            echo '```'
+          } > /tmp/issue-body.md
+          cat /tmp/issue-body.md >> "$GITHUB_STEP_SUMMARY"
+          # Issues may be disabled on this fork; the failed run is the signal then.
+          existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty' || true)
           if [ -z "$existing" ]; then
-            {
-              echo 'The scheduled upstream sync fast-forwarded `main` but could not cleanly rebase `devin` onto it. Rebase manually:'
-              echo
-              echo '```bash'
-              echo 'git fetch origin'
-              echo 'git checkout devin'
-              echo 'git rebase origin/main'
-              echo '# resolve conflicts'
-              echo 'git push --force-with-lease origin devin'
-              echo '```'
-            } > /tmp/issue-body.md
-            gh issue create --title "$title" --body-file /tmp/issue-body.md
+            gh issue create --title "$title" --body-file /tmp/issue-body.md || true
           fi
+          exit 1
