@@ -26,6 +26,8 @@ export interface AcpWebSocketStdioOptions {
 export interface AcpWebSocketStdioHandle {
   readonly stdio: Stdio.Stdio;
   readonly terminationError: Effect.Effect<EffectAcpErrors.AcpError>;
+  /** Closes the socket; the close handler then settles `terminationError`. */
+  readonly close: Effect.Effect<void>;
 }
 
 function redactUrl(url: string): string {
@@ -175,5 +177,6 @@ export const connectAcpWebSocketStdio = Effect.fn("connectAcpWebSocketStdio")(fu
   return {
     stdio,
     terminationError: Deferred.await(closed).pipe(Effect.flip),
+    close: Effect.sync(() => socket.close()),
   };
 });
