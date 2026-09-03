@@ -460,7 +460,7 @@ export const make = (
       ...(options.protocolLogging?.logger ? { logger: options.protocolLogging.logger } : {}),
     };
 
-    const acpClientLayer = yield* Effect.gen(function* () {
+    const transport = yield* Effect.gen(function* () {
       const spawn = options.spawn;
       if (spawn !== undefined) {
         const spawnCommand = yield* resolveSpawnCommand(spawn.command, spawn.args, {
@@ -507,7 +507,10 @@ export const make = (
           Effect.forkIn(runtimeScope),
         );
 
-        return EffectAcpClient.layerChildProcess(child, acpClientOptions);
+        return {
+          layer: EffectAcpClient.layerChildProcess(child, acpClientOptions),
+          terminate: child.kill({ forceKillAfter: "1 second" }).pipe(Effect.ignore),
+        };
       }
       if (options.webSocket === undefined) {
         return yield* Effect.die(
@@ -517,18 +520,20 @@ export const make = (
       const webSocketStdio = yield* connectAcpWebSocketStdio(options.webSocket.url).pipe(
         Effect.provideService(Scope.Scope, runtimeScope),
       );
-      yield* watchTermination(webSocketStdio.terminationError);
-      return Layer.effect(
-        EffectAcpClient.AcpClient,
-        EffectAcpClient.make(
-          webSocketStdio.stdio,
-          acpClientOptions,
-          webSocketStdio.terminationError,
+      return {
+        layer: Layer.effect(
+          EffectAcpClient.AcpClient,
+          EffectAcpClient.make(
+            webSocketStdio.stdio,
+            acpClientOptions,
+            webSocketStdio.terminationError,
+          ),
         ),
-      );
+        terminate: webSocketStdio.close,
+      };
     });
 
-    const acpContext = yield* Layer.build(acpClientLayer).pipe(
+    const acpContext = yield* Layer.build(transport.layer).pipe(
       Effect.provideService(Scope.Scope, runtimeScope),
     );
 
@@ -961,7 +966,7 @@ export const make = (
       error: EffectAcpErrors.AcpError,
     ) {
       yield* recordTermination(error);
-      yield* child.kill({ forceKillAfter: "1 second" }).pipe(Effect.ignore);
+      yield* transport.terminate;
     });
 
     const cancel = Effect.gen(function* () {
