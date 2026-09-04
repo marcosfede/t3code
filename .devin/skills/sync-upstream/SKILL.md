@@ -17,8 +17,8 @@ A full sync run means all three, in order; stop and report if any step cannot be
 ## How the fork is laid out
 
 - `upstream` = `git@github.com:pingdotgg/t3code.git`, branch `main`. Read-only for us.
-- `origin` = `git@github.com:marcosfede/t3code.git`. The only branch that matters is **`devin`**.
-  `origin/main` is an abandoned mirror; ignore it or delete it, never push to it.
+- `origin` = `git@github.com:marcosfede/t3code.git`. Its only branch is **`devin`**; do not create a `main`
+  mirror, `upstream/main` is one fetch away.
 - `devin` = `upstream/main` + a short stack of fork commits (Devin CLI / Devin Cloud providers, PostHog off,
   fork release workflow, this sync tooling), then **one trailing commit `ci(fork): drop upstream workflows`**
   ("the strip commit") that deletes every file in `.github/workflows/` except `release-fork.yml` and
@@ -151,9 +151,6 @@ If a build job fails on missing tooling rather than on our code, `release-fork.y
 `git show upstream/main:.github/workflows/release.yml` and port the fix; for example upstream added
 `libsecret-1-dev pkg-config` to the Linux build in 2026-09. Since the strip commit is on top, a fix to a fork-owned
 workflow file goes in a fork commit below it, same as any other fork change.
-
-Legacy: `v0.1.0` (2026-08-14) predates this scheme. It is higher than every `0.0.x-fork.N`, so any app still
-running it will not self-update; nobody is known to run it. Delete it only with the developer's say-so.
 
 ## Update the local T3 install
 
