@@ -12,7 +12,8 @@ A full sync run means all three, in order; stop and report if any step cannot be
    on top and the strip commit last. Sections: Check status, Manual sync, Bring a local checkout up to date.
 2. **Build**: a fork desktop release `v<upstream>-fork.<N>` built from that exact `devin` tip. Section: Ship a
    desktop build.
-3. **Install**: the developer's installed T3 Code app can see that release. Section: Update the local T3 install.
+3. **Install**: the developer's installed T3 Code app runs that release. On macOS this is a manual binary
+   replacement (unsigned builds cannot self-update). Section: Update the local T3 install.
 
 ## How the fork is laid out
 
@@ -50,7 +51,8 @@ and `git rebase` must not run there.
 git fetch upstream main && git fetch origin devin
 git worktree add --detach /tmp/t3-sync origin/devin
 cd /tmp/t3-sync
-git rebase --onto HEAD^ HEAD          # drop the strip commit (verify HEAD was "ci(fork): drop upstream workflows" first)
+strip=$(git log --format=%H --grep='^ci(fork): drop upstream workflows$' upstream/main..HEAD)   # exactly one sha
+git rebase --onto "$strip^" "$strip"  # drop the strip commit wherever it sits (fork commits pushed since the last sync land above it)
 git rebase upstream/main              # resolve conflicts; `git add -A && GIT_EDITOR=true git rebase --continue`
 ```
 
@@ -104,8 +106,9 @@ does not build anything.
 
 A sync is not finished until a desktop build of the new `devin` exists. `.github/workflows/release-fork.yml`
 builds unsigned Linux x64 + macOS arm64 artifacts (about 6 minutes) and publishes them as a GitHub Release on
-the fork. Packaged builds carry an `app-update.yml` pointing at `marcosfede/t3code`, so installed CI builds
-self-update from these releases.
+the fork. Packaged builds carry an `app-update.yml` pointing at `marcosfede/t3code`, so the installed app sees new
+releases and downloads them. The Linux AppImage installs them too; the macOS build cannot (see Update the local
+T3 install), so the version scheme below still matters for the check/download half.
 
 **Versioning: `<upstream version>-fork.<N>`**, for example `0.0.38-fork.1`, then `0.0.38-fork.2` after another
 sync that is still on upstream `0.0.38`, then `0.0.39-fork.1` once upstream bumps. The upstream version is the
@@ -156,13 +159,16 @@ workflow file goes in a fork commit below it, same as any other fork change.
 
 The desktop app bundles the server, so updating the app updates both. The fork does not publish `npx t3` to npm.
 
+**On macOS every fork release is installed by replacing the app bundle by hand.** The in-app updater finds and
+downloads the release, then fails at install with "Desktop updater install operation reported an error". That is
+Squirrel.Mac refusing to swap in a bundle whose code signature does not match the running app (`securityd` logs
+`-67062`, `errSecCSUnsigned`): the fork builds are ad-hoc signed (`codesign -dv` shows `Signature=adhoc`), and
+Squirrel only installs onto a Developer-ID-signed app. Nothing in the build or the version scheme is wrong, and no
+retry will make it work. Until the fork signs and notarizes its macOS builds, do this instead:
+
 - Installed app: `/Applications/T3 Code (Alpha).app`. Version:
   `defaults read "/Applications/T3 Code (Alpha).app/Contents/Info.plist" CFBundleShortVersionString`.
-- If `Contents/Resources/app-update.yml` exists, it is a CI build and self-updates: the app picks up the new release
-  on its next check, or use the in-app update action. Nothing else to do.
-- If that file is missing, the app was built locally and cannot self-update; the in-app check shows "Automatic
-  updates are not available because no update feed is configured". Replace it once with the CI build; afterwards it
-  self-updates:
+- Replace it with the release built above:
 
   ```bash
   gh release download "v$version" -R marcosfede/t3code -p "T3-Code-${version}-arm64.dmg" -D /tmp/t3-release --clobber
@@ -170,11 +176,19 @@ The desktop app bundles the server, so updating the app updates both. The fork d
   rm -rf "/Applications/T3 Code (Alpha).app" && cp -R "/Volumes/T3Code/T3 Code (Alpha).app" /Applications/
   hdiutil detach /Volumes/T3Code
   xattr -dr com.apple.quarantine "/Applications/T3 Code (Alpha).app"   # unsigned build
+  defaults read "/Applications/T3 Code (Alpha).app/Contents/Info.plist" CFBundleShortVersionString   # expect $version
   ```
 
-  The app must be quit before it is replaced, and the developer is often driving you from it. Ask before quitting
-  it, and never kill it by pattern. User data lives in `~/Library/Application Support/T3 Code (Alpha)` and
-  `~/.t3`, which the reinstall does not touch.
+  If the in-app updater already downloaded the release, the same bundle is sitting sha512-verified in
+  `~/Library/Caches/t3code-updater/pending/T3-Code-${version}-arm64.zip`; `ditto -x -k` that zip into
+  `/Applications/` instead of downloading the dmg again. Delete `~/Library/Caches/t3code-updater` afterwards so the
+  app does not keep offering the install it cannot perform.
+
+- The app must be quit before it is replaced, and the developer is often driving you from it. Ask before quitting
+  it, and never kill it by pattern. User data lives in `~/Library/Application Support/t3code` and `~/.t3`, which
+  the reinstall does not touch.
+- A locally built app (no `Contents/Resources/app-update.yml`) shows "Automatic updates are not available because
+  no update feed is configured" instead. Same replacement procedure.
 
 ## Bring a local checkout up to date
 
