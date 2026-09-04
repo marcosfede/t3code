@@ -114,7 +114,10 @@ fork revision": a literal fourth component (`0.0.38.1`) is not valid semver and 
 so self-update would break. Prerelease identifiers compare numerically, so `fork.10 > fork.9`, and
 `0.0.39-fork.1 > 0.0.38-fork.9`. The fork's "latest" update channel is unaffected by the suffix: electron-updater
 takes GitHub's Latest release and compares with `semver.gt`, and `resolveDesktopUpdateChannel` only treats
-`-nightly.` as a separate channel. Never publish a fork build as a GitHub pre-release.
+`-nightly.` as a separate channel. Never publish a fork build as a GitHub pre-release. A commit hash cannot be part
+of the version (hashes have no order, so the updater could not tell newer from older); instead the release tag
+targets the built commit and the release title carries its short hash, e.g. `T3 Code (fork) 0.0.38-fork.1 (03aeafb41)`.
+`git rev-parse "v$version^{commit}"` recovers the exact commit.
 
 ```bash
 git fetch origin devin
