@@ -3,6 +3,7 @@ import { describe, expect, it } from "@effect/vitest";
 import {
   buildDevinFamilyOptionDescriptors,
   buildDevinModelFamilies,
+  isCurrentDevinModelFamily,
   parseDevinModelSlug,
   resolveDevinConcreteModelId,
 } from "./DevinModelCatalog.ts";
@@ -24,10 +25,28 @@ const FIXTURE_DEVIN_MODEL_OPTIONS = [
   { value: "claude-opus-4-6-thinking-1m-max", name: "Claude Opus 4.6 Thinking 1M Max [dev]" },
   { value: "MODEL_CLAUDE_4_5_OPUS", name: "Claude Opus 4.5" },
   { value: "MODEL_CLAUDE_4_5_OPUS_THINKING", name: "Claude Opus 4.5 Thinking" },
+  { value: "MODEL_PRIVATE_2", name: "Claude Sonnet 4.5" },
+  { value: "MODEL_PRIVATE_3", name: "Claude Sonnet 4.5 Thinking" },
+  { value: "MODEL_PRIVATE_11", name: "Claude Haiku 4.5" },
   { value: "MODEL_PRIVATE_12", name: "GPT-5.1 No Thinking" },
+  { value: "MODEL_PRIVATE_13", name: "GPT-5.1 Low Thinking" },
+  { value: "MODEL_PRIVATE_14", name: "GPT-5.1 Medium Thinking" },
+  { value: "MODEL_PRIVATE_15", name: "GPT-5.1 High Thinking" },
   {
     value: "fusion-gpt-5-6-sol-medium-sidekick-swe-1-7-medium",
     name: "Fusion (GPT-5.6 Sol Medium Thinking + SWE-1.7 Medium)",
+  },
+  {
+    value: "fusion-gpt-5-6-sol-high-fast-sidekick-gpt-5-6-luna-high-priority",
+    name: "Fusion (GPT-5.6 Sol High Thinking Fast + GPT-5.6 Luna High Thinking Fast)",
+  },
+  {
+    value: "fusion-gpt-5-6-sol-high-sidekick-gpt-5-6-luna-high",
+    name: "Fusion (GPT-5.6 Sol High Thinking + GPT-5.6 Luna High Thinking)",
+  },
+  {
+    value: "fusion-claude-opus-5-low-sidekick-glm-5-2",
+    name: "Fusion (Claude Opus 5 Low + GLM-5.2 High)",
   },
   { value: "swe-1-6", name: "SWE-1.6" },
   { value: "swe-1-6-fast", name: "SWE-1.6 Fast" },
@@ -78,13 +97,56 @@ describe("parseDevinModelSlug", () => {
       baseSlug: "MODEL_CLAUDE_4_5_OPUS",
       thinking: true,
     });
-    expect(parseDevinModelSlug("MODEL_PRIVATE_12")).toEqual({ baseSlug: "MODEL_PRIVATE_12" });
   });
 
-  it("keeps fusion combos and token-only ids whole", () => {
-    expect(parseDevinModelSlug("fusion-gpt-5-6-sol-medium-sidekick-swe-1-7-medium")).toEqual({
-      baseSlug: "fusion-gpt-5-6-sol-medium-sidekick-swe-1-7-medium",
+  it("recognizes options encoded by opaque legacy ids", () => {
+    expect(parseDevinModelSlug("MODEL_PRIVATE_2")).toEqual({
+      baseSlug: "claude-sonnet-4-5",
     });
+    expect(parseDevinModelSlug("MODEL_PRIVATE_3")).toEqual({
+      baseSlug: "claude-sonnet-4-5",
+      thinking: true,
+    });
+    expect(parseDevinModelSlug("MODEL_PRIVATE_12")).toEqual({
+      baseSlug: "gpt-5-1",
+      effort: "none",
+    });
+    expect(parseDevinModelSlug("MODEL_PRIVATE_13")).toEqual({
+      baseSlug: "gpt-5-1",
+      effort: "low",
+    });
+    expect(parseDevinModelSlug("MODEL_PRIVATE_14")).toEqual({
+      baseSlug: "gpt-5-1",
+      effort: "medium",
+    });
+    expect(parseDevinModelSlug("MODEL_PRIVATE_15")).toEqual({
+      baseSlug: "gpt-5-1",
+      effort: "high",
+    });
+  });
+
+  it("splits fusion combos into primary options plus a sidekick", () => {
+    expect(parseDevinModelSlug("fusion-gpt-5-6-sol-medium-sidekick-swe-1-7-medium")).toEqual({
+      baseSlug: "fusion-gpt-5-6-sol",
+      effort: "medium",
+      sidekick: "swe-1-7-medium",
+    });
+    expect(
+      parseDevinModelSlug("fusion-gpt-5-6-sol-high-fast-sidekick-gpt-5-6-luna-high-priority"),
+    ).toEqual({
+      baseSlug: "fusion-gpt-5-6-sol",
+      effort: "high",
+      speed: "fast",
+      sidekick: "gpt-5-6-luna-high",
+    });
+    expect(parseDevinModelSlug("fusion-claude-opus-5-low-sidekick-glm-5-2")).toEqual({
+      baseSlug: "fusion-claude-opus-5",
+      effort: "low",
+      sidekick: "glm-5-2",
+    });
+  });
+
+  it("keeps token-only ids whole", () => {
     expect(parseDevinModelSlug("max")).toEqual({ baseSlug: "max" });
   });
 });
@@ -103,15 +165,68 @@ describe("buildDevinModelFamilies", () => {
     expect(familyBySlug("gpt-5-6-sol").name).toBe("GPT-5.6 Sol");
     expect(familyBySlug("gpt-5-3-codex").name).toBe("GPT-5.3-Codex");
     expect(familyBySlug("MODEL_CLAUDE_4_5_OPUS").variants).toHaveLength(2);
+    expect(familyBySlug("claude-sonnet-4-5")).toMatchObject({
+      name: "Claude Sonnet 4.5",
+      variants: [{ slug: "MODEL_PRIVATE_2" }, { slug: "MODEL_PRIVATE_3" }],
+    });
+    expect(familyBySlug("gpt-5-1")).toMatchObject({
+      name: "GPT-5.1",
+      variants: [
+        { slug: "MODEL_PRIVATE_12" },
+        { slug: "MODEL_PRIVATE_13" },
+        { slug: "MODEL_PRIVATE_14" },
+        { slug: "MODEL_PRIVATE_15" },
+      ],
+    });
+  });
+
+  it("groups fusion combos by primary model and names them after it", () => {
+    expect(familyBySlug("fusion-gpt-5-6-sol")).toMatchObject({
+      name: "Fusion (GPT-5.6 Sol)",
+      variants: [
+        { slug: "fusion-gpt-5-6-sol-medium-sidekick-swe-1-7-medium" },
+        { slug: "fusion-gpt-5-6-sol-high-fast-sidekick-gpt-5-6-luna-high-priority" },
+        { slug: "fusion-gpt-5-6-sol-high-sidekick-gpt-5-6-luna-high" },
+      ],
+    });
   });
 
   it("collapses single-variant groups to the concrete slug and name", () => {
-    expect(familyBySlug("MODEL_PRIVATE_12").name).toBe("GPT-5.1 No Thinking");
+    expect(familyBySlug("MODEL_PRIVATE_11").name).toBe("Claude Haiku 4.5");
     expect(familyBySlug("neptune-high").name).toBe("Neptune High");
     expect(families.some((family) => family.slug === "neptune")).toBe(false);
-    expect(familyBySlug("fusion-gpt-5-6-sol-medium-sidekick-swe-1-7-medium").variants).toHaveLength(
-      1,
+    expect(familyBySlug("fusion-claude-opus-5-low-sidekick-glm-5-2").name).toBe(
+      "Fusion (Claude Opus 5 Low + GLM-5.2 High)",
     );
+  });
+});
+
+describe("isCurrentDevinModelFamily", () => {
+  it("allowlists frontier families by grouped slug and treats everything else as legacy", () => {
+    for (const slug of [
+      "claude-opus-5",
+      "gpt-5-6-sol",
+      "fusion-gpt-5-6-sol",
+      "swe-1-7",
+      "adaptive",
+    ]) {
+      expect(isCurrentDevinModelFamily(slug), slug).toBe(true);
+    }
+    for (const slug of [
+      "claude-opus-4-6",
+      "MODEL_CLAUDE_4_5_OPUS",
+      "claude-sonnet-4-5",
+      "gpt-5-1",
+      "gpt-5-3-codex",
+      "swe-1-6",
+      "swe-1-6-fast",
+      "atlas3",
+      "adaptive-dev",
+      "neptune-high",
+      "unknown-new-model",
+    ]) {
+      expect(isCurrentDevinModelFamily(slug), slug).toBe(false);
+    }
   });
 });
 
@@ -201,8 +316,51 @@ describe("buildDevinFamilyOptionDescriptors", () => {
     });
   });
 
+  it("exposes options for opaque legacy model families", () => {
+    const sonnet = buildDevinFamilyOptionDescriptors({
+      family: familyBySlug("claude-sonnet-4-5"),
+    });
+    expect(descriptorById(sonnet, "thinking")).toMatchObject({ currentValue: false });
+
+    const gpt = buildDevinFamilyOptionDescriptors({ family: familyBySlug("gpt-5-1") });
+    expect(descriptorById(gpt, "reasoning")).toMatchObject({
+      currentValue: "medium",
+      options: [
+        { id: "none", label: "None" },
+        { id: "low", label: "Low" },
+        { id: "medium", label: "Medium", isDefault: true },
+        { id: "high", label: "High" },
+      ],
+    });
+  });
+
+  it("exposes a sidekick select for fusion families, labelled from the variant names", () => {
+    const descriptors = buildDevinFamilyOptionDescriptors({
+      family: familyBySlug("fusion-gpt-5-6-sol"),
+      sessionCurrentValue: "fusion-gpt-5-6-sol-high-fast-sidekick-gpt-5-6-luna-high-priority",
+    });
+    expect(descriptors.map((descriptor) => descriptor.id)).toEqual([
+      "reasoning",
+      "speed",
+      "sidekick",
+    ]);
+    expect(descriptorById(descriptors, "sidekick")).toMatchObject({
+      currentValue: "gpt-5-6-luna-high",
+      options: [
+        { id: "swe-1-7-medium", label: "SWE-1.7 Medium" },
+        { id: "gpt-5-6-luna-high", label: "GPT-5.6 Luna High Thinking", isDefault: true },
+      ],
+    });
+    expect(descriptorById(descriptors, "speed")).toMatchObject({ currentValue: "fast" });
+
+    const inactive = buildDevinFamilyOptionDescriptors({
+      family: familyBySlug("fusion-gpt-5-6-sol"),
+    });
+    expect(descriptorById(inactive, "sidekick")).toMatchObject({ currentValue: "swe-1-7-medium" });
+  });
+
   it("returns no descriptors for flat models", () => {
-    expect(buildDevinFamilyOptionDescriptors({ family: familyBySlug("MODEL_PRIVATE_12") })).toEqual(
+    expect(buildDevinFamilyOptionDescriptors({ family: familyBySlug("MODEL_PRIVATE_11") })).toEqual(
       [],
     );
   });
@@ -230,6 +388,38 @@ describe("resolveDevinConcreteModelId", () => {
         supportedModelIds,
       }),
     ).toBe("claude-opus-4-6-thinking-1m");
+    expect(
+      resolveDevinConcreteModelId({
+        model: "claude-sonnet-4-5",
+        options: [{ id: "thinking", value: true }],
+        supportedModelIds,
+      }),
+    ).toBe("MODEL_PRIVATE_3");
+    expect(
+      resolveDevinConcreteModelId({
+        model: "gpt-5-1",
+        options: [{ id: "reasoning", value: "high" }],
+        supportedModelIds,
+      }),
+    ).toBe("MODEL_PRIVATE_15");
+    expect(
+      resolveDevinConcreteModelId({
+        model: "fusion-gpt-5-6-sol",
+        options: [
+          { id: "reasoning", value: "high" },
+          { id: "speed", value: "fast" },
+          { id: "sidekick", value: "gpt-5-6-luna-high" },
+        ],
+        supportedModelIds,
+      }),
+    ).toBe("fusion-gpt-5-6-sol-high-fast-sidekick-gpt-5-6-luna-high-priority");
+    expect(
+      resolveDevinConcreteModelId({
+        model: "fusion-gpt-5-6-sol",
+        options: [{ id: "sidekick", value: "gpt-5-6-luna-high" }],
+        supportedModelIds,
+      }),
+    ).toBe("fusion-gpt-5-6-sol-high-sidekick-gpt-5-6-luna-high");
   });
 
   it("uses the family defaults for unselected options", () => {

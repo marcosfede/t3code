@@ -75,6 +75,39 @@ describe("buildDevinDiscoveredModelsFromSessionSetup", () => {
     ]);
   });
 
+  it("flags families outside the frontier allowlist as legacy", () => {
+    const setup = {
+      sessionId: "sess-1",
+      configOptions: [
+        {
+          type: "select",
+          id: "model",
+          name: "Model",
+          category: "model",
+          currentValue: "claude-opus-5-medium",
+          options: [
+            { name: "Claude Opus 5 Medium", value: "claude-opus-5-medium" },
+            { name: "Claude Opus 5 High", value: "claude-opus-5-high" },
+            { name: "SWE-1.6", value: "swe-1-6" },
+            { name: "Claude Opus 4.6", value: "claude-opus-4-6" },
+            { name: "Claude Opus 4.6 Thinking", value: "claude-opus-4-6-thinking" },
+          ],
+        },
+      ],
+    } as unknown as EffectAcpSchema.NewSessionResponse;
+
+    expect(
+      buildDevinDiscoveredModelsFromSessionSetup(setup).map((model) => [
+        model.slug,
+        model.isLegacy ?? false,
+      ]),
+    ).toEqual([
+      ["claude-opus-5", false],
+      ["swe-1-6", true],
+      ["claude-opus-4-6", true],
+    ]);
+  });
+
   it("returns no models when the setup exposes no model option", () => {
     const setup = {
       sessionId: "sess-1",
