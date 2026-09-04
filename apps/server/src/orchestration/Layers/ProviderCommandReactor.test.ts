@@ -3194,6 +3194,69 @@ describe("ProviderCommandReactor", () => {
   });
 
   effectIt.effect(
+    "holds a turn start behind a pending interrupt until the session stops running",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* Effect.promise(() => createHarness());
+        const now = "2026-01-01T00:00:00.000Z";
+        const threadId = ThreadId.make("thread-1");
+        const setSession = (status: "running" | "interrupted", commandId: string) =>
+          harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make(commandId),
+            threadId,
+            session: {
+              threadId,
+              status,
+              providerName: "codex",
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              runtimeMode: "approval-required",
+              activeTurnId: status === "running" ? asTurnId("turn-1") : null,
+              lastError: null,
+              updatedAt: now,
+            },
+            createdAt: now,
+          });
+
+        yield* setSession("running", "cmd-session-set-running");
+        yield* harness.engine.dispatch({
+          type: "thread.turn.interrupt",
+          commandId: CommandId.make("cmd-turn-interrupt-then-send"),
+          threadId,
+          turnId: asTurnId("turn-1"),
+          createdAt: now,
+        });
+        yield* harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-after-interrupt"),
+          threadId,
+          message: {
+            messageId: asMessageId("user-message-after-interrupt"),
+            role: "user",
+            text: "do this instead",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        });
+
+        yield* Effect.promise(() => waitFor(() => harness.interruptTurn.mock.calls.length === 1));
+        yield* Effect.promise(() => harness.drain());
+        expect(harness.sendTurn.mock.calls.length).toBe(0);
+
+        // The provider confirms the abort; only now may the new turn go out.
+        yield* setSession("interrupted", "cmd-session-set-interrupted");
+
+        yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 1));
+        expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+          threadId,
+          input: "do this instead",
+        });
+      }),
+  );
+
+  effectIt.effect(
     "stops a running session and records the failure when provider interrupt fails",
     () =>
       Effect.gen(function* () {
