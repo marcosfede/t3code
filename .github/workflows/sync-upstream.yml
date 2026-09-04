@@ -1,14 +1,17 @@
 name: Sync upstream
 
-# Keeps this fork in sync with pingdotgg/t3code:
-#  - fast-forwards `main` to upstream/main (pristine mirror, never diverges)
-#  - rebases `devin` (this fork's changes) onto the new main
-# Runs daily and on demand. If the rebase hits a conflict it opens an issue
-# instead of pushing, so a human (or Devin) can resolve it.
+# Keeps `devin` (this fork's changes) rebased onto pingdotgg/t3code main.
+# Runs daily and on demand. A rebase conflict fails the run so a human (or
+# Devin) can resolve it by hand.
 #
-# Requires the SYNC_UPSTREAM_TOKEN repo secret: a PAT with contents+workflows
-# write access. The default GITHUB_TOKEN cannot push commits that touch
-# .github/workflows/, so upstream workflow changes would fail the sync.
+# The fork does not carry upstream's workflows. They are upstream's releases,
+# deploys, and PR automation, need upstream's secrets and runners, and any
+# change under .github/workflows/ makes GitHub reject pushes made with the
+# default GITHUB_TOKEN. So after each rebase the workflow directory is reset
+# to the fork's own files in a single trailing commit. That commit is removed
+# before the next rebase and recreated after it, so upstream edits to those
+# files never conflict, the workflow directory never changes between pushes,
+# and no personal access token is needed.
 
 on:
   schedule:
@@ -17,12 +20,14 @@ on:
 
 permissions:
   contents: write
-  issues: write
-  actions: write
 
 concurrency:
   group: sync-upstream
   cancel-in-progress: false
+
+env:
+  STRIP_SUBJECT: "ci(fork): drop upstream workflows"
+  KEEP_WORKFLOWS: "release-fork.yml sync-upstream.yml"
 
 jobs:
   sync:
@@ -32,73 +37,54 @@ jobs:
         with:
           ref: devin
           fetch-depth: 0
-          token: ${{ secrets.SYNC_UPSTREAM_TOKEN || github.token }}
 
       - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      # The fork mirrors upstream's workflow *files* but must not *run* them:
-      # they are upstream's releases, deploys, and PR automation. Anything not
-      # on the allowlist is disabled, so workflows newly added upstream arrive
-      # disabled instead of running nightly schedules or deploys here.
-      - name: Disable inherited upstream workflows
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          keep='ci.yml release-fork.yml sync-upstream.yml'
-          gh api "repos/$GITHUB_REPOSITORY/actions/workflows" --paginate \
-            --jq '.workflows[] | select(.state == "active") | .path' |
-          while read -r path; do
-            case "$path" in .github/workflows/*) ;; *) continue ;; esac
-            name=$(basename "$path")
-            case " $keep " in *" $name "*) continue ;; esac
-            gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/$name/disable"
-            echo "disabled $name"
-          done
-
-      - name: Fast-forward main to upstream
+      - name: Fetch upstream
         run: |
           git remote add upstream https://github.com/pingdotgg/t3code.git
           git fetch upstream main
-          git push origin upstream/main:refs/heads/main
 
-      - name: Rebase devin onto main
-        id: rebase
+      - name: Remove the previous workflow-strip commit
         run: |
-          if git rebase upstream/main; then
-            echo "conflict=false" >> "$GITHUB_OUTPUT"
-          else
+          strip=$(git log --format='%H %s' upstream/main..HEAD | awk -v s="$STRIP_SUBJECT" 'substr($0, index($0, " ") + 1) == s { print $1; exit }')
+          if [ -n "$strip" ]; then
+            git rebase --onto "$strip^" "$strip"
+          fi
+
+      - name: Rebase devin onto upstream
+        run: |
+          if ! git rebase upstream/main; then
             git rebase --abort
-            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            {
+              echo 'Could not cleanly rebase `devin` onto upstream/main. Rebase manually:'
+              echo
+              echo '```bash'
+              echo 'git fetch upstream main'
+              echo 'git checkout devin'
+              echo 'git rebase upstream/main   # resolve conflicts'
+              echo 'git push --force-with-lease origin devin'
+              echo '```'
+              echo
+              echo 'The trailing "drop upstream workflows" commit is recreated by the next sync run.'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::devin does not rebase cleanly onto upstream/main; see the job summary"
+            exit 1
           fi
 
-      - name: Push rebased branch
-        if: steps.rebase.outputs.conflict == 'false'
-        run: git push --force-with-lease origin devin
-
-      - name: Report conflict
-        if: steps.rebase.outputs.conflict == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Keep only the fork's workflows
         run: |
-          title="Upstream sync conflict: devin needs a manual rebase"
-          {
-            echo 'The scheduled upstream sync fast-forwarded `main` but could not cleanly rebase `devin` onto it. Rebase manually:'
-            echo
-            echo '```bash'
-            echo 'git fetch origin'
-            echo 'git checkout devin'
-            echo 'git rebase origin/main'
-            echo '# resolve conflicts'
-            echo 'git push --force-with-lease origin devin'
-            echo '```'
-          } > /tmp/issue-body.md
-          cat /tmp/issue-body.md >> "$GITHUB_STEP_SUMMARY"
-          # Issues may be disabled on this fork; the failed run is the signal then.
-          existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty' || true)
-          if [ -z "$existing" ]; then
-            gh issue create --title "$title" --body-file /tmp/issue-body.md || true
+          for path in .github/workflows/*; do
+            name=$(basename "$path")
+            case " $KEEP_WORKFLOWS " in *" $name "*) continue ;; esac
+            git rm -q "$path"
+          done
+          if ! git diff --cached --quiet; then
+            git commit -q -m "$STRIP_SUBJECT"
           fi
-          exit 1
+
+      - name: Push
+        run: git push --force-with-lease origin devin
