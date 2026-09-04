@@ -33,6 +33,10 @@ export type DevinAcpRuntimeFactory = (
   Crypto.Crypto | Scope.Scope
 >;
 
+/** `devin acp` has been seen deadlocking mid-tool-call and ignoring SIGTERM;
+ * a stuck child must never block session stop or server shutdown. */
+const DEVIN_ACP_FORCE_KILL_AFTER = "1 second" as const;
+
 export function buildDevinAcpSpawnInput(
   devinSettings: DevinAcpRuntimeDevinSettings | null | undefined,
   cwd: string,
@@ -43,6 +47,7 @@ export function buildDevinAcpSpawnInput(
     args: ["acp"],
     cwd,
     ...(environment ? { env: environment } : {}),
+    forceKillAfter: DEVIN_ACP_FORCE_KILL_AFTER,
   };
 }
 

@@ -1137,4 +1137,55 @@ describe("AcpSessionRuntime", () => {
       Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
     );
   });
+
+  it.effect(
+    "force-kills a deadlocked agent that ignores SIGTERM when spawn.forceKillAfter is set",
+    () => {
+      const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "acp-runtime-"));
+      const exitLogPath = NodePath.join(tempDir, "exit.log");
+      const readExitLog = () =>
+        NodeFS.existsSync(exitLogPath) ? NodeFS.readFileSync(exitLogPath, "utf8") : "";
+      const isAlive = (pid: number) => {
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      return Effect.gen(function* () {
+        const scope = yield* Scope.make();
+        const runtime = yield* AcpSessionRuntime.make({
+          ...mockRuntimeOptions,
+          spawn: {
+            ...mockRuntimeOptions.spawn,
+            env: { T3_ACP_EXIT_LOG_PATH: exitLogPath },
+            forceKillAfter: "1 second",
+          },
+        }).pipe(Effect.provideService(Scope.Scope, scope));
+        yield* runtime.start();
+        yield* runtime.notify("_test/deadlock", {});
+        const pid = yield* Effect.gen(function* () {
+          while (!/deadlocked:(\d+)/.test(readExitLog())) yield* Effect.sleep("20 millis");
+          return Number(/deadlocked:(\d+)/.exec(readExitLog())?.[1]);
+        }).pipe(Effect.timeout("5 seconds"));
+        expect(isAlive(pid)).toBe(true);
+
+        // Close detached: a hung release would otherwise block this test forever.
+        const closing = yield* Scope.close(scope, Exit.void).pipe(Effect.forkDetach);
+        const closed = yield* Fiber.await(closing).pipe(Effect.timeoutOption("5 seconds"));
+        if (Option.isNone(closed)) process.kill(pid, "SIGKILL");
+
+        expect(Option.isSome(closed)).toBe(true);
+        expect(readExitLog()).not.toContain("SIGTERM");
+        expect(isAlive(pid)).toBe(false);
+      }).pipe(
+        Effect.provide(NodeServices.layer),
+        TestClock.withLive,
+        Effect.ensuring(
+          Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true })),
+        ),
+      );
+    },
+  );
 });

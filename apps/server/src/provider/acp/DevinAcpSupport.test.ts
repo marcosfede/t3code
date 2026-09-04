@@ -21,6 +21,7 @@ describe("buildDevinAcpSpawnInput", () => {
       args: ["acp"],
       cwd: "/tmp/project",
       env: { HOME: "/home/dev" },
+      forceKillAfter: "1 second",
     });
   });
 
@@ -31,6 +32,7 @@ describe("buildDevinAcpSpawnInput", () => {
       command: "devin",
       args: ["acp"],
       cwd: "/tmp/project",
+      forceKillAfter: "1 second",
     });
   });
 });
