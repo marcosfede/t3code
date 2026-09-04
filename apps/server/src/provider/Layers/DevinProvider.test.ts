@@ -63,14 +63,10 @@ describe("buildDevinDiscoveredModelsFromSessionSetup", () => {
     expect(model.aliases).toEqual(["swe-1-6-fast", "swe-1-6"]);
     expect(model.capabilities?.optionDescriptors).toEqual([
       {
-        id: "speed",
-        label: "Speed",
-        type: "select",
-        currentValue: "fast",
-        options: [
-          { id: "standard", label: "Standard" },
-          { id: "fast", label: "Fast", isDefault: true },
-        ],
+        id: "fastMode",
+        label: "Fast Mode",
+        type: "boolean",
+        currentValue: true,
       },
     ]);
   });

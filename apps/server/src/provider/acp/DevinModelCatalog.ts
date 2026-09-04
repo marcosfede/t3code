@@ -29,6 +29,7 @@ const isEffort = (token: string): token is Effort =>
  * A missing dimension means the family's plain variant along that axis.
  * `sidekick` is the secondary model of a Fusion combo (`fusion-<primary>-<options>-sidekick-<sidekick>`). */
 interface DevinVariantOptions {
+  readonly lead?: string;
   readonly effort?: Effort;
   readonly speed?: "fast" | "ultrafast";
   readonly contextWindow?: "1m";
@@ -48,13 +49,7 @@ const OPAQUE_MODEL_VARIANTS = new Map<string, { readonly baseSlug: string } & De
   ["MODEL_PRIVATE_15", { baseSlug: "gpt-5-1", effort: "high" }],
 ]);
 
-/**
- * Frontier families shown in the main picker list, keyed on the grouped
- * family slug. Everything Devin advertises outside this list (older
- * generations, unreleased codenames, dev routers) folds under Legacy. Kept
- * in code rather than `model-manifest.json` because the manifest refreshes
- * from upstream, which has no Devin entry.
- */
+/** Frontier families shown in the main picker; everything else is legacy. */
 const DEVIN_CURRENT_MODELS: ReadonlySet<string> = new Set([
   // Anthropic
   "claude-opus-5",
@@ -63,31 +58,14 @@ const DEVIN_CURRENT_MODELS: ReadonlySet<string> = new Set([
   // OpenAI
   "gpt-6-astra",
   "gpt-5-6-sol",
-  "gpt-5-6-luna",
-  "gpt-5-6-terra",
   // Google
   "gemini-3-8-flash",
   // xAI
   "grok-4-6",
-  // Zhipu
-  "glm-5-3",
-  "glm-5-3-flash",
-  // Moonshot
-  "kimi-k3",
-  // DeepSeek
-  "deepseek-v4-pro",
-  "deepseek-v4-flash",
-  // NVIDIA
-  "nemotron-3-ultra",
   // Cognition
   "swe-1-7",
-  "swe-1-7-lightning",
-  "adaptive",
-  // Fusion combos of the above
-  "fusion-gpt-5-6-sol",
-  "fusion-claude-opus-5",
-  "fusion-claude-fable-5-1",
-  "fusion-atlas3",
+  // Fusion (leads restricted to the families above)
+  "fusion",
 ]);
 
 /** Whether a grouped family slug is on the frontier allowlist; false means legacy. */
@@ -132,22 +110,26 @@ function stripTrailingOptionTokens(slug: string): { baseSlug: string } & DevinVa
 /**
  * Splits a Devin model id into its family base and the option tokens it
  * encodes (`claude-opus-4-6-thinking-1m` → base `claude-opus-4-6`, thinking,
- * 1m). Fusion combos group by primary model, with the sidekick as one more
- * axis; the sidekick's own speed token folds into the combo's speed since
- * Devin only advertises them in lockstep.
+ * 1m). Current Fusion combos share one family with the primary model as a
+ * lead axis; legacy leads retain their own `fusion-<lead>` family. The
+ * sidekick's own speed token folds into the combo's speed since Devin only
+ * advertises them in lockstep.
  */
 export function parseDevinModelSlug(slug: string): { baseSlug: string } & DevinVariantOptions {
   const opaqueVariant = OPAQUE_MODEL_VARIANTS.get(slug);
   if (opaqueVariant) return opaqueVariant;
   const sidekickAt = slug.startsWith("fusion-") ? slug.indexOf(FUSION_SIDEKICK_SEPARATOR) : -1;
   if (sidekickAt === -1) return stripTrailingOptionTokens(slug);
-  const primary = stripTrailingOptionTokens(slug.slice(0, sidekickAt));
+  const primary = stripTrailingOptionTokens(slug.slice("fusion-".length, sidekickAt));
   const sidekickSpeed = slug
     .slice(sidekickAt + FUSION_SIDEKICK_SEPARATOR.length)
     .match(/^(.*?)(?:-(fast|priority|ultrafast))?$/i);
   const speed = primary.speed ?? (sidekickSpeed?.[2] ? SPEEDS[sidekickSpeed[2]] : undefined);
+  const currentLead = isCurrentDevinModelFamily(primary.baseSlug);
   return {
     ...primary,
+    baseSlug: currentLead ? "fusion" : `fusion-${primary.baseSlug}`,
+    ...(currentLead ? { lead: primary.baseSlug } : {}),
     ...(speed ? { speed } : {}),
     sidekick: sidekickSpeed?.[1] ?? "",
   };
@@ -170,10 +152,18 @@ const plainestVariant = (variants: ReadonlyArray<DevinModelVariant>) =>
 /** Family display name: the plainest variant's name with trailing option words
  * removed. Fusion combos keep only the primary half: `Fusion (GPT-5.6 Sol)`. */
 function familyDisplayName(variants: ReadonlyArray<DevinModelVariant>, fallback: string): string {
+  if (variants.some((variant) => variant.lead)) return "Fusion";
   const name = plainestVariant(variants).name;
   const fusion = FUSION_NAME.exec(name);
   const stripped = stripTrailingOptionWords(fusion?.[1] ?? name);
   return stripped ? (fusion ? `Fusion (${stripped})` : stripped) : fallback;
+}
+
+/** Fusion lead label from the plainest variant carrying it. */
+function leadLabel(variants: ReadonlyArray<DevinModelVariant>, lead: string): string {
+  const name = plainestVariant(variants.filter((variant) => variant.lead === lead)).name;
+  const fusion = FUSION_NAME.exec(name);
+  return stripTrailingOptionWords(fusion?.[1] ?? name) || lead;
 }
 
 /** Sidekick label from the plainest variant carrying it: the `+ …` half of the Fusion name. */
@@ -214,6 +204,9 @@ function familyDefaults(family: DevinModelFamily, active?: DevinModelVariant) {
   const has = (predicate: (variant: DevinModelVariant) => unknown) =>
     family.variants.some(predicate);
   return {
+    lead: !has((v) => v.lead)
+      ? undefined
+      : (active?.lead ?? family.variants.find((v) => v.lead)?.lead),
     reasoning: !has((v) => v.effort)
       ? undefined
       : (active?.effort ??
@@ -249,10 +242,8 @@ export function buildDevinFamilyOptionDescriptors(input: {
   if (family.variants.length < 2) return [];
   const has = (predicate: (variant: DevinModelVariant) => unknown) =>
     family.variants.some(predicate);
-  const defaults = familyDefaults(
-    family,
-    family.variants.find((v) => v.slug === input.sessionCurrentValue),
-  );
+  const active = family.variants.find((v) => v.slug === input.sessionCurrentValue);
+  const defaults = familyDefaults(family, active);
   const choices = (
     values: ReadonlyArray<readonly [string, string]>,
     selected: string | undefined,
@@ -264,6 +255,21 @@ export function buildDevinFamilyOptionDescriptors(input: {
     }));
 
   const descriptors: Array<ProviderOptionDescriptor> = [];
+  const leads = [
+    ...new Set(family.variants.flatMap((variant) => (variant.lead ? [variant.lead] : []))),
+  ];
+  if (leads.length > 0) {
+    descriptors.push(
+      buildSelectOptionDescriptor({
+        id: "lead",
+        label: "Lead",
+        options: choices(
+          leads.map((lead) => [lead, leadLabel(family.variants, lead)] as const),
+          defaults.lead,
+        ),
+      }),
+    );
+  }
   if (defaults.reasoning) {
     descriptors.push(
       buildSelectOptionDescriptor({
@@ -282,23 +288,35 @@ export function buildDevinFamilyOptionDescriptors(input: {
     );
   }
   if (defaults.speed) {
-    const speeds = [
-      ["standard", "Standard"],
-      ["fast", "Fast"],
-      ["ultrafast", "Ultrafast"],
-    ] as const;
-    descriptors.push(
-      buildSelectOptionDescriptor({
-        id: "speed",
-        label: "Speed",
-        options: choices(
-          speeds.filter(([value]) =>
-            value === "standard" ? has((v) => !v.speed) : has((v) => v.speed === value),
+    const hasUltrafast = has((variant) => variant.speed === "ultrafast");
+    const hasFast = has((variant) => variant.speed === "fast");
+    if (hasFast && !hasUltrafast) {
+      descriptors.push(
+        buildBooleanOptionDescriptor({
+          id: "fastMode",
+          label: "Fast Mode",
+          currentValue: active?.speed === "fast",
+        }),
+      );
+    } else {
+      const speeds = [
+        ["standard", "Standard"],
+        ["fast", "Fast"],
+        ["ultrafast", "Ultrafast"],
+      ] as const;
+      descriptors.push(
+        buildSelectOptionDescriptor({
+          id: "speed",
+          label: "Speed",
+          options: choices(
+            speeds.filter(([value]) =>
+              value === "standard" ? has((v) => !v.speed) : has((v) => v.speed === value),
+            ),
+            defaults.speed,
           ),
-          defaults.speed,
-        ),
-      }),
-    );
+        }),
+      );
+    }
   }
   if (defaults.contextWindow) {
     descriptors.push(
@@ -363,9 +381,16 @@ export function resolveDevinConcreteModelId(input: {
   const defaults = familyDefaults(family);
   const selected = (id: string) => getProviderOptionStringSelectionValue(input.options, id);
   const selectedThinking = getProviderOptionBooleanSelectionValue(input.options, "thinking");
-  const reasoning = selected("reasoning") ?? defaults.reasoning;
-  const speed = selected("speed") ?? defaults.speed;
+  const selectedFastMode = getProviderOptionBooleanSelectionValue(input.options, "fastMode");
+  const selectedLead = selected("lead");
+  const selectedReasoning = selected("reasoning");
+  const selectedSpeed = selected("speed");
+  const reasoning = selectedReasoning ?? defaults.reasoning;
+  const speed =
+    selectedSpeed ??
+    (selectedFastMode === undefined ? defaults.speed : selectedFastMode ? "fast" : "standard");
   const wanted = {
+    lead: selectedLead ?? defaults.lead,
     effort: reasoning === "default" ? undefined : reasoning,
     speed: speed === "standard" ? undefined : speed,
     contextWindow:
@@ -373,21 +398,26 @@ export function resolveDevinConcreteModelId(input: {
     thinking: (selectedThinking ?? defaults.thinking) ? (true as const) : undefined,
     sidekick: selected("sidekick") ?? defaults.sidekick,
   };
-  const explicit: Record<keyof typeof wanted, boolean> = {
-    effort: selected("reasoning") !== undefined,
-    speed: selected("speed") !== undefined,
+  const scoredKeys = ["effort", "speed", "contextWindow", "thinking", "sidekick"] as const;
+  const explicit: Record<(typeof scoredKeys)[number], boolean> = {
+    effort: selectedReasoning !== undefined,
+    speed: selectedSpeed !== undefined || selectedFastMode !== undefined,
     contextWindow: selected("contextWindow") !== undefined,
     thinking: selectedThinking !== undefined,
     sidekick: selected("sidekick") !== undefined,
   };
   const score = (variant: DevinModelVariant) =>
-    (Object.keys(wanted) as Array<keyof typeof wanted>).reduce(
+    scoredKeys.reduce(
       (total, key) =>
         variant[key] === wanted[key]
           ? total + 1 + (explicit[key] ? 1 : 0) + (wanted[key] === undefined ? 0 : 1)
           : total,
       0,
     );
-  return family.variants.reduce((best, variant) => (score(variant) > score(best) ? variant : best))
+  const matchingLead =
+    wanted.lead && family.variants.some((variant) => variant.lead === wanted.lead)
+      ? family.variants.filter((variant) => variant.lead === wanted.lead)
+      : family.variants;
+  return matchingLead.reduce((best, variant) => (score(variant) > score(best) ? variant : best))
     .slug;
 }
