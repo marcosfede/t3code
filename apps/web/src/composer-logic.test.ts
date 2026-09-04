@@ -60,6 +60,7 @@ describe("composerSubmissionIntentForEnter", () => {
         shiftKey: false,
         modifierKey: false,
         isDraftThread: true,
+        isTurnRunning: false,
       }),
     ).toBe("foreground");
   });
@@ -71,6 +72,7 @@ describe("composerSubmissionIntentForEnter", () => {
         shiftKey: false,
         modifierKey: false,
         isDraftThread: true,
+        isTurnRunning: false,
       }),
     ).toBeNull();
   });
@@ -82,6 +84,7 @@ describe("composerSubmissionIntentForEnter", () => {
         shiftKey: true,
         modifierKey: false,
         isDraftThread: true,
+        isTurnRunning: false,
       }),
     ).toBeNull();
   });
@@ -93,6 +96,7 @@ describe("composerSubmissionIntentForEnter", () => {
         shiftKey: false,
         modifierKey: true,
         isDraftThread: true,
+        isTurnRunning: false,
       }),
     ).toBe("background");
   });
@@ -104,6 +108,31 @@ describe("composerSubmissionIntentForEnter", () => {
         shiftKey: false,
         modifierKey: true,
         isDraftThread: false,
+        isTurnRunning: false,
+      }),
+    ).toBe("foreground");
+  });
+
+  it("interrupts a running turn before sending with Mod+Enter", () => {
+    expect(
+      composerSubmissionIntentForEnter({
+        isMobileViewport: false,
+        shiftKey: false,
+        modifierKey: true,
+        isDraftThread: false,
+        isTurnRunning: true,
+      }),
+    ).toBe("interrupt");
+  });
+
+  it("steers a running turn with plain Enter", () => {
+    expect(
+      composerSubmissionIntentForEnter({
+        isMobileViewport: false,
+        shiftKey: false,
+        modifierKey: false,
+        isDraftThread: false,
+        isTurnRunning: true,
       }),
     ).toBe("foreground");
   });
