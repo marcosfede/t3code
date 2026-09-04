@@ -7,17 +7,8 @@ import {
   applyDevinAcpModelSelection,
   buildDevinAcpSpawnInput,
   currentDevinModelIdFromSessionSetup,
-  resolveDevinAcpBaseModelId,
   supportedDevinModelIdsFromSessionSetup,
 } from "./DevinAcpSupport.ts";
-
-describe("resolveDevinAcpBaseModelId", () => {
-  it("keeps trimmed model ids and omits empty ones", () => {
-    expect(resolveDevinAcpBaseModelId(undefined)).toBeUndefined();
-    expect(resolveDevinAcpBaseModelId("   ")).toBeUndefined();
-    expect(resolveDevinAcpBaseModelId("  swe-1-6-fast  ")).toBe("swe-1-6-fast");
-  });
-});
 
 describe("buildDevinAcpSpawnInput", () => {
   it("launches `devin acp` with the configured binary path", () => {
