@@ -160,6 +160,6 @@ jobs:
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "T3 Code (fork) v$VERSION" \
-            --notes "Unsigned fork build (Linux x64 AppImage, macOS arm64 dmg). macOS: right-click → Open, or run \`xattr -d com.apple.quarantine\` on the app." \
+            --title "T3 Code (fork) $VERSION (${GITHUB_SHA:0:9})" \
+            --notes "Built from \`$GITHUB_SHA\` on \`$GITHUB_REF_NAME\`. Unsigned fork build (Linux x64 AppImage, macOS arm64 dmg). macOS: right-click → Open, or run \`xattr -d com.apple.quarantine\` on the app." \
             assets/*
