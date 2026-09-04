@@ -62,8 +62,6 @@ const DEVIN_CURRENT_MODELS: ReadonlySet<string> = new Set([
   "gemini-3-8-flash",
   // xAI
   "grok-4-6",
-  // Cognition
-  "swe-1-7",
   // Fusion (leads restricted to the families above)
   "fusion",
 ]);
