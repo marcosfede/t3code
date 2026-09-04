@@ -76,11 +76,6 @@ export const makeDevinAcpRuntime = (
     );
   });
 
-export function resolveDevinAcpBaseModelId(model: string | null | undefined): string | undefined {
-  const trimmed = model?.trim();
-  return trimmed && trimmed.length > 0 ? trimmed : undefined;
-}
-
 type DevinSessionSetupResult =
   | EffectAcpSchema.LoadSessionResponse
   | EffectAcpSchema.NewSessionResponse

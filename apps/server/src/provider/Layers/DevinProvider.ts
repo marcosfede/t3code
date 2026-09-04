@@ -31,6 +31,10 @@ import {
   type ProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
 import { makeDevinAcpRuntime } from "../acp/DevinAcpSupport.ts";
+import {
+  buildDevinFamilyOptionDescriptors,
+  buildDevinModelFamilies,
+} from "../acp/DevinModelCatalog.ts";
 
 const DEVIN_PRESENTATION = {
   displayName: "Devin",
@@ -121,23 +125,38 @@ export function buildDevinDiscoveredModelsFromSessionSetup(
   if (!modelOption || modelOption.type !== "select") {
     return [];
   }
-  const seen = new Set<string>();
-  return flattenSessionConfigSelectOptions(modelOption.options)
-    .map((option): ServerProviderModel | undefined => {
-      const slug = option.value.trim();
-      if (!slug || seen.has(slug)) {
-        return undefined;
-      }
-      seen.add(slug);
-      return {
-        slug,
-        name: option.name.trim() || slug,
-        isCustom: false,
-        ...(slug === modelOption.currentValue.trim() ? { isDefault: true } : {}),
-        capabilities: EMPTY_CAPABILITIES,
-      };
-    })
-    .filter((model): model is ServerProviderModel => model !== undefined);
+  const rawOptions = flattenSessionConfigSelectOptions(modelOption.options);
+  const currentValue =
+    typeof modelOption.currentValue === "string" ? modelOption.currentValue.trim() : undefined;
+  const families = buildDevinModelFamilies(rawOptions);
+
+  return families.map((family): ServerProviderModel => {
+    const isFlat = family.variants.length === 1;
+    const isDefault =
+      currentValue !== undefined &&
+      family.variants.some((variant) => variant.slug === currentValue);
+
+    const descriptors = isFlat
+      ? []
+      : buildDevinFamilyOptionDescriptors({
+          family,
+          sessionCurrentValue: currentValue,
+        });
+
+    const capabilities =
+      descriptors.length > 0
+        ? createModelCapabilities({ optionDescriptors: descriptors })
+        : EMPTY_CAPABILITIES;
+
+    return {
+      slug: family.slug,
+      name: family.name,
+      isCustom: false,
+      ...(isDefault ? { isDefault: true } : {}),
+      capabilities,
+      ...(!isFlat ? { aliases: family.variants.map((variant) => variant.slug) } : {}),
+    };
+  });
 }
 
 const discoverDevinModelsViaAcp = (

@@ -59,10 +59,10 @@ import {
   currentDevinModelIdFromSessionSetup,
   devinModelConfigOptionIdFromSessionSetup,
   makeDevinAcpRuntime,
-  resolveDevinAcpBaseModelId,
   supportedDevinModelIdsFromSessionSetup,
   type DevinAcpRuntimeFactory,
 } from "../acp/DevinAcpSupport.ts";
+import { resolveDevinConcreteModelId } from "../acp/DevinModelCatalog.ts";
 import { type DevinAdapterShape } from "../Services/DevinAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 
@@ -715,12 +715,16 @@ export function makeDevinAdapter(
             ),
           );
 
-          const requestedStartModelId = devinModelSelection?.model
-            ? resolveDevinAcpBaseModelId(devinModelSelection.model)
-            : undefined;
           const supportedModelIds = supportedDevinModelIdsFromSessionSetup(
             started.sessionSetupResult,
           );
+          const requestedStartModelId = devinModelSelection?.model
+            ? resolveDevinConcreteModelId({
+                model: devinModelSelection.model,
+                options: devinModelSelection.options,
+                supportedModelIds,
+              })
+            : undefined;
           const modelConfigOptionId = devinModelConfigOptionIdFromSessionSetup(
             started.sessionSetupResult,
           );
@@ -963,7 +967,11 @@ export function makeDevinAdapter(
                   ? input.modelSelection
                   : undefined;
               const requestedTurnModelId = turnModelSelection?.model
-                ? resolveDevinAcpBaseModelId(turnModelSelection.model)
+                ? resolveDevinConcreteModelId({
+                    model: turnModelSelection.model,
+                    options: turnModelSelection.options,
+                    supportedModelIds: ctx.supportedModelIds,
+                  })
                 : undefined;
               const currentModelId = yield* applyDevinAcpModelSelection({
                 runtime: ctx.acp,

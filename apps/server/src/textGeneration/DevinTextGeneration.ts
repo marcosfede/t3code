@@ -27,9 +27,9 @@ import {
   applyDevinAcpModelSelection,
   currentDevinModelIdFromSessionSetup,
   makeDevinAcpRuntime,
-  resolveDevinAcpBaseModelId,
   supportedDevinModelIdsFromSessionSetup,
 } from "../provider/acp/DevinAcpSupport.ts";
+import { resolveDevinConcreteModelId } from "../provider/acp/DevinModelCatalog.ts";
 
 const DEVIN_TIMEOUT_MS = 180_000;
 
@@ -60,7 +60,6 @@ export const makeDevinTextGeneration = Effect.fn("makeDevinTextGeneration")(func
     modelSelection: ModelSelection;
   }): Effect.Effect<S["Type"], TextGenerationError, S["DecodingServices"]> =>
     Effect.gen(function* () {
-      const resolvedModel = resolveDevinAcpBaseModelId(modelSelection.model);
       const outputRef = yield* Ref.make("");
       const runtime = yield* makeDevinAcpRuntime({
         devinSettings,
@@ -84,11 +83,19 @@ export const makeDevinTextGeneration = Effect.fn("makeDevinTextGeneration")(func
 
       const promptResult = yield* Effect.gen(function* () {
         const started = yield* runtime.start();
+        const supportedModelIds = supportedDevinModelIdsFromSessionSetup(
+          started.sessionSetupResult,
+        );
+        const resolvedModel = resolveDevinConcreteModelId({
+          model: modelSelection.model,
+          options: modelSelection.options,
+          supportedModelIds,
+        });
         yield* applyDevinAcpModelSelection({
           runtime,
           currentModelId: currentDevinModelIdFromSessionSetup(started.sessionSetupResult),
           requestedModelId: resolvedModel,
-          supportedModelIds: supportedDevinModelIdsFromSessionSetup(started.sessionSetupResult),
+          supportedModelIds,
           mapError: (cause) =>
             new TextGenerationError({
               operation,
