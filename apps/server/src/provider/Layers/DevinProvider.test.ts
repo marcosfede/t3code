@@ -55,9 +55,24 @@ describe("buildDevinDiscoveredModelsFromSessionSetup", () => {
     } as unknown as EffectAcpSchema.NewSessionResponse;
 
     const models = buildDevinDiscoveredModelsFromSessionSetup(setup);
-    expect(models.map((model) => model.slug)).toEqual(["swe-1-6-fast", "swe-1-6"]);
-    expect(models[0]?.isDefault).toBe(true);
-    expect(models[1]?.isDefault).toBeUndefined();
+    expect(models).toHaveLength(1);
+    const model = models[0]!;
+    expect(model.slug).toBe("swe-1-6");
+    expect(model.name).toBe("SWE-1.6");
+    expect(model.isDefault).toBe(true);
+    expect(model.aliases).toEqual(["swe-1-6-fast", "swe-1-6"]);
+    expect(model.capabilities?.optionDescriptors).toEqual([
+      {
+        id: "speed",
+        label: "Speed",
+        type: "select",
+        currentValue: "fast",
+        options: [
+          { id: "standard", label: "Standard" },
+          { id: "fast", label: "Fast", isDefault: true },
+        ],
+      },
+    ]);
   });
 
   it("returns no models when the setup exposes no model option", () => {

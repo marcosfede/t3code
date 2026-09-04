@@ -15,6 +15,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as EffectAcpErrors from "effect-acp/errors";
+import type * as EffectAcpSchema from "effect-acp/schema";
 
 import {
   ApprovalRequestId,
@@ -27,6 +28,7 @@ import {
 } from "@t3tools/contracts";
 
 import { ServerConfig } from "../../config.ts";
+import type * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
 import {
   devinPromptSettlementBelongsToContext,
   isAcpConnectionLostError,
@@ -914,6 +916,95 @@ it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
       yield* Deferred.await(contentDelta);
 
       yield* Fiber.interrupt(eventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("resolves family model selection with options to concrete slug on start and turn", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-family-model-selection");
+      const configOptionCalls: Array<readonly [string, string | boolean]> = [];
+
+      const fakeRuntime = {
+        handleSessionUpdate: () => Effect.void,
+        handleRequestPermission: () => Effect.void,
+        handleExtNotification: () => Effect.void,
+        initialize: () => Effect.die(new Error("not used")),
+        start: () =>
+          Effect.succeed({
+            sessionId: "mock-session-1",
+            initializeResult: {} as EffectAcpSchema.InitializeResponse,
+            modelConfigId: "model",
+            sessionSetupResult: {
+              sessionId: "mock-session-1",
+              configOptions: [
+                {
+                  id: "model",
+                  name: "Model",
+                  category: "model",
+                  type: "select" as const,
+                  currentValue: "claude-opus-5-low",
+                  options: [
+                    { value: "claude-opus-5-low", name: "Claude Opus 5 Low" },
+                    { value: "claude-opus-5-high", name: "Claude Opus 5 High" },
+                  ],
+                },
+              ],
+            } as unknown as EffectAcpSchema.NewSessionResponse,
+          }),
+        getEvents: () => Stream.empty,
+        drainEvents: Effect.void,
+        getModeState: Effect.succeed(undefined),
+        getConfigOptions: Effect.succeed([]),
+        prompt: () =>
+          Effect.succeed({ stopReason: "end_turn" } as unknown as EffectAcpSchema.PromptResponse),
+        cancel: Effect.void,
+        setMode: () => Effect.die(new Error("not used")),
+        setConfigOption: (configId: string, value: string | boolean) => {
+          configOptionCalls.push([configId, value] as const);
+          return Effect.succeed({
+            configOptions: [],
+          } as unknown as EffectAcpSchema.SetSessionConfigOptionResponse);
+        },
+        setModel: () => Effect.die(new Error("not used")),
+        awaitTermination: Effect.never,
+      } as unknown as AcpSessionRuntime.AcpSessionRuntime["Service"];
+
+      const adapter = yield* makeDevinAdapter(decodeDevinSettings({}), {
+        makeAcpRuntime: () => Effect.succeed(fakeRuntime),
+      });
+
+      const session = yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("devin"),
+          model: "claude-opus-5",
+          options: [{ id: "reasoning", value: "high" }],
+        },
+      });
+
+      assert.equal(session.model, "claude-opus-5-high");
+      assert.deepStrictEqual(configOptionCalls, [["model", "claude-opus-5-high"]]);
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "test turn with model switch",
+        attachments: [],
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("devin"),
+          model: "claude-opus-5",
+          options: [{ id: "reasoning", value: "low" }],
+        },
+      });
+
+      assert.deepStrictEqual(configOptionCalls, [
+        ["model", "claude-opus-5-high"],
+        ["model", "claude-opus-5-low"],
+      ]);
+
       yield* adapter.stopSession(threadId);
     }),
   );
