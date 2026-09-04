@@ -1572,7 +1572,7 @@ const make = Effect.gen(function* () {
       .interruptTurn({ threadId: event.payload.threadId })
       .pipe(Effect.catchCause(recoverInterruptFailure));
     // The session may have left running before the deferred existed to see it.
-    const settledThread = yield* resolveThread(event.payload.threadId);
+    const settledThread = yield* resolveThreadShell(event.payload.threadId);
     if (settledThread?.session?.status !== "running") {
       yield* settleInterrupt(event.payload.threadId);
     }
