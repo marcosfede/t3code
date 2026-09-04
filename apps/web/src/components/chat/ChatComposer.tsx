@@ -2871,11 +2871,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     ],
   );
   const submitCitationAndSend = useCallback(() => {
+    // Mod+Enter is how the comment bubble sends at all, so it never doubles
+    // as an interrupt there.
     const intent = composerSubmissionIntentForEnter({
       isMobileViewport,
       shiftKey: false,
       modifierKey: true,
       isDraftThread: routeKind === "draft",
+      isTurnRunning: false,
     });
     submitComposer(undefined, intent ?? "foreground");
   }, [isMobileViewport, routeKind, submitComposer]);
@@ -2989,6 +2992,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             shiftKey: event.shiftKey,
             modifierKey: event.metaKey || event.ctrlKey,
             isDraftThread: routeKind === "draft",
+            isTurnRunning: phase === "running",
           })
         : null;
     if (submissionIntent) {
