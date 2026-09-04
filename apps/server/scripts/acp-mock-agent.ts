@@ -1338,9 +1338,19 @@ const program = Effect.gen(function* () {
     return Effect.succeed({});
   });
 
-  yield* agent.handleUnknownExtNotification((method) =>
-    method === "_test/exit" ? Effect.sync(() => process.exit(19)) : Effect.void,
-  );
+  yield* agent.handleUnknownExtNotification((method) => {
+    if (method === "_test/exit") {
+      return Effect.sync(() => process.exit(19));
+    }
+    if (method === "_test/deadlock") {
+      // Block the event loop for good: no stdin, no signal handlers, only SIGKILL works.
+      return Effect.sync(() => {
+        logExit(`deadlocked:${process.pid}`);
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+      });
+    }
+    return Effect.void;
+  });
 
   return yield* Effect.never;
 }).pipe(
