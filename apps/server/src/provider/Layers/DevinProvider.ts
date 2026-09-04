@@ -172,7 +172,7 @@ const discoverDevinModelsViaAcp = (
       environment,
       childProcessSpawner,
       cwd: process.cwd(),
-      clientInfo: { name: "t3-code-provider-probe", version: "0.0.0" },
+      clientInfo: { name: "t3-code", version: "0.0.0" },
     });
     const started = yield* acp.start();
     return buildDevinDiscoveredModelsFromSessionSetup(started.sessionSetupResult);
