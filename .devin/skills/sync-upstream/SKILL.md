@@ -6,6 +6,14 @@ argument-hint: "[status|sync|release|install|local]"
 
 # Sync the fork with upstream
 
+A full sync run means all three, in order; stop and report if any step cannot be completed:
+
+1. **Code**: `origin/devin` and the local checkout are rebased on the latest `upstream/main`, with the fork commits
+   on top and the strip commit last. Sections: Check status, Manual sync, Bring a local checkout up to date.
+2. **Build**: a fork desktop release `v<upstream>-fork.<N>` built from that exact `devin` tip. Section: Ship a
+   desktop build.
+3. **Install**: the developer's installed T3 Code app can see that release. Section: Update the local T3 install.
+
 ## How the fork is laid out
 
 - `upstream` = `git@github.com:pingdotgg/t3code.git`, branch `main`. Read-only for us.
@@ -99,9 +107,21 @@ builds unsigned Linux x64 + macOS arm64 artifacts (about 6 minutes) and publishe
 the fork. Packaged builds carry an `app-update.yml` pointing at `marcosfede/t3code`, so installed CI builds
 self-update from these releases.
 
-Versioning: the fork has its own `0.1.x` line, which must stay above upstream's desktop version (`0.0.x`) so
-electron-updater treats fork builds as newer. Next version = latest fork release + 1 patch:
-`gh release list -R marcosfede/t3code --limit 1`.
+**Versioning: `<upstream version>-fork.<N>`**, for example `0.0.38-fork.1`, then `0.0.38-fork.2` after another
+sync that is still on upstream `0.0.38`, then `0.0.39-fork.1` once upstream bumps. The upstream version is the
+`version` field of `apps/desktop/package.json` at the synced commit. This is the semver spelling of "x.y.z plus a
+fork revision": a literal fourth component (`0.0.38.1`) is not valid semver and electron-updater cannot compare it,
+so self-update would break. Prerelease identifiers compare numerically, so `fork.10 > fork.9`, and
+`0.0.39-fork.1 > 0.0.38-fork.9`. The fork's "latest" update channel is unaffected by the suffix: electron-updater
+takes GitHub's Latest release and compares with `semver.gt`, and `resolveDesktopUpdateChannel` only treats
+`-nightly.` as a separate channel. Never publish a fork build as a GitHub pre-release.
+
+```bash
+git fetch origin devin
+base=$(git show origin/devin:apps/desktop/package.json | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).version')
+n=$(( $(gh release list -R marcosfede/t3code --limit 100 --json tagName --jq "[.[] | select(.tagName | startswith(\"v${base}-fork.\"))] | length") + 1 ))
+version="${base}-fork.${n}"
+```
 
 **Race condition.** The release workflow builds and tags `github.sha`, the tip of `devin` at dispatch time. If
 `devin` is force-pushed while it runs (the daily sync at 06:17 UTC, a manual sync, or another agent), that commit
@@ -110,18 +130,21 @@ drops out of the branch history and the release points at an orphan, or the chec
 ```bash
 gh run list -R marcosfede/t3code --workflow sync-upstream.yml --status in_progress   # must print nothing
 gh run list -R marcosfede/t3code --workflow sync-upstream.yml --status queued        # must print nothing
-git fetch origin devin && sha=$(git rev-parse origin/devin)
-gh workflow run release-fork.yml -R marcosfede/t3code --ref devin -f version=0.1.N
+sha=$(git rev-parse origin/devin)
+gh workflow run release-fork.yml -R marcosfede/t3code --ref devin -f version="$version"
 sleep 10 && id=$(gh run list -R marcosfede/t3code --workflow release-fork.yml --limit 1 --json databaseId --jq '.[0].databaseId')
 gh run watch "$id" -R marcosfede/t3code --exit-status
 # verify the release points at the commit you built and that it is still on devin
-target=$(gh release view "v0.1.N" -R marcosfede/t3code --json targetCommitish --jq .targetCommitish)
+target=$(gh release view "v$version" -R marcosfede/t3code --json targetCommitish --jq .targetCommitish)
 [ "$target" = "$sha" ] && git merge-base --is-ancestor "$sha" origin/devin && echo ok
 ```
 
 Do not push to `devin` or dispatch a sync until `gh run watch` returns. Avoid dispatching within a few minutes of
-06:17 UTC. If the check fails, delete and rebuild: `gh release delete v0.1.N -R marcosfede/t3code --cleanup-tag -y`,
+06:17 UTC. If the check fails, delete and rebuild: `gh release delete "v$version" -R marcosfede/t3code --cleanup-tag -y`,
 then dispatch again once `devin` is quiet.
+
+Legacy: `v0.1.0` (2026-08-14) predates this scheme. It is higher than every `0.0.x-fork.N`, so any app still
+running it will not self-update; nobody is known to run it. Delete it only with the developer's say-so.
 
 ## Update the local T3 install
 
@@ -131,12 +154,13 @@ The desktop app bundles the server, so updating the app updates both. The fork d
   `defaults read "/Applications/T3 Code (Alpha).app/Contents/Info.plist" CFBundleShortVersionString`.
 - If `Contents/Resources/app-update.yml` exists, it is a CI build and self-updates: the app picks up the new release
   on its next check, or use the in-app update action. Nothing else to do.
-- If that file is missing, the app was built locally and cannot self-update. Replace it once with the CI build;
-  afterwards it self-updates:
+- If that file is missing, the app was built locally and cannot self-update; the in-app check shows "Automatic
+  updates are not available because no update feed is configured". Replace it once with the CI build; afterwards it
+  self-updates:
 
   ```bash
-  gh release download v0.1.N -R marcosfede/t3code -p 'T3-Code-0.1.N-arm64.dmg' -D /tmp/t3-release --clobber
-  hdiutil attach /tmp/t3-release/T3-Code-0.1.N-arm64.dmg -nobrowse -mountpoint /Volumes/T3Code
+  gh release download "v$version" -R marcosfede/t3code -p "T3-Code-${version}-arm64.dmg" -D /tmp/t3-release --clobber
+  hdiutil attach "/tmp/t3-release/T3-Code-${version}-arm64.dmg" -nobrowse -mountpoint /Volumes/T3Code
   rm -rf "/Applications/T3 Code (Alpha).app" && cp -R "/Volumes/T3Code/T3 Code (Alpha).app" /Applications/
   hdiutil detach /Volumes/T3Code
   xattr -dr com.apple.quarantine "/Applications/T3 Code (Alpha).app"   # unsigned build
