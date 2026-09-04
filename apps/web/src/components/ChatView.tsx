@@ -6046,6 +6046,24 @@ function ChatViewContent(props: ChatViewProps) {
     ],
   );
 
+  /** Stops the active turn; resolves false when the interrupt was rejected. */
+  const interruptActiveThreadTurn = async (): Promise<boolean> => {
+    if (!activeThread) return false;
+    const result = await interruptThreadTurn({
+      environmentId,
+      input: buildThreadTurnInterruptInput(activeThread),
+    });
+    if (result._tag === "Success") return true;
+    if (!isAtomCommandInterrupted(result)) {
+      const error = squashAtomCommandFailure(result);
+      setThreadError(
+        activeThread.id,
+        error instanceof Error ? error.message : "Failed to interrupt the current turn.",
+      );
+    }
+    return false;
+  };
+
   const onSend = async (
     e?: { preventDefault: () => void },
     submissionIntent: ComposerSubmissionIntent = "foreground",
@@ -6399,6 +6417,16 @@ function ChatViewContent(props: ChatViewProps) {
     };
 
     sendInFlightRef.current = true;
+    // The interrupt is persisted before the turn start, and the server handles
+    // provider intents in order, so the message opens a fresh turn instead of
+    // steering the one being stopped.
+    if (submissionIntent === "interrupt" && phase === "running") {
+      const interrupted = await interruptActiveThreadTurn();
+      if (!interrupted) {
+        sendInFlightRef.current = false;
+        return;
+      }
+    }
     const attachmentCapabilitiesBeforeUpload = readLiveAttachmentCapabilities();
     if (attachmentCapabilitiesBeforeUpload.fileBlockReason !== null) {
       sendInFlightRef.current = false;
@@ -6822,18 +6850,7 @@ function ChatViewContent(props: ChatViewProps) {
   };
 
   const onInterrupt = async () => {
-    if (!activeThread) return;
-    const result = await interruptThreadTurn({
-      environmentId,
-      input: buildThreadTurnInterruptInput(activeThread),
-    });
-    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-      const error = squashAtomCommandFailure(result);
-      setThreadError(
-        activeThread.id,
-        error instanceof Error ? error.message : "Failed to interrupt the current turn.",
-      );
-    }
+    await interruptActiveThreadTurn();
   };
 
   const onRespondToApproval = useCallback(
