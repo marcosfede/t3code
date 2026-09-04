@@ -117,3 +117,14 @@ automatically. HTML previews cannot access your T3 Code session.
 
 On mobile, select a PDF attachment or link to open it. iOS uses the native viewer;
 Android opens the system chooser.
+
+## Background threads and interrupting a turn
+
+On desktop, press `Cmd+Enter` on macOS or `Ctrl+Enter` on Windows and Linux from a new thread to
+start it in the background. T3 Code opens another new thread and shows an **Open** action for the
+thread that started. The new thread keeps the selected workspace mode and base branch. If **New
+worktree** is selected, each background thread creates its own worktree.
+
+While the agent is working, plain `Enter` sends your message into the running turn and the agent
+picks it up as it goes. Press `Cmd+Enter` or `Ctrl+Enter` instead to stop the current turn first
+and start a new one with your message.
