@@ -67,6 +67,14 @@ An async question can outlive the turn or a server restart. The engine reads tha
 durable activity before resolving it because the in-memory command snapshot omits old activities.
 Do not infer that a request has disappeared merely because it is outside the recent window.
 
+Devin Cloud keeps working after its ACP WebSocket closes. ACP v1 `session/load` restores the
+event subscription, not the pending `session/prompt` response. The
+[reconnection boundary](../../apps/server/src/provider/acp/DevinCloudReconnect.ts) therefore
+never resends a dispatched prompt: it retains the turn and uses cloud status to settle it.
+Cloud loads must wait for the actual RPC response rather than the generic replay-idle fallback,
+so completion while disconnected can be recovered from session metadata. Approvals belong to
+the old connection and must be cancelled before replacement handlers accept new requests.
+
 Capabilities must describe what the provider can actually do. Antigravity can capture workspace
 checkpoints but cannot roll back its conversation. The [checkpoint boundary](./overview.md#turn-completion-and-checkpoints)
 therefore rejects revert before touching files. Native permission and question option IDs must
