@@ -718,6 +718,66 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         ]);
       });
 
+      it("replaces Devin models after discovery but retains them while probing or failing", () => {
+        const previousProvider = {
+          instanceId: ProviderInstanceId.make("devin"),
+          driver: ProviderDriverKind.make("devin"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          checkedAt: "2026-07-17T00:00:00.000Z",
+          version: "1.0.0",
+          models: [
+            {
+              slug: "devin-current",
+              name: "Devin Current",
+              isCustom: false,
+              capabilities: null,
+            },
+            {
+              slug: "devin-stale",
+              name: "Devin Stale",
+              isCustom: false,
+              capabilities: null,
+            },
+          ],
+          slashCommands: [],
+          skills: [],
+        } as const satisfies ServerProvider;
+        const refreshedProvider = {
+          ...previousProvider,
+          checkedAt: "2026-07-17T00:01:00.000Z",
+          models: [previousProvider.models[0]!],
+        } satisfies ServerProvider;
+        const pendingProvider = {
+          ...previousProvider,
+          status: "warning",
+          installed: false,
+          auth: { status: "unknown" },
+          checkedAt: "2026-07-17T00:02:00.000Z",
+          version: null,
+          models: [],
+        } satisfies ServerProvider;
+        const failedProvider = {
+          ...previousProvider,
+          status: "error",
+          auth: { status: "unknown" },
+          checkedAt: "2026-07-17T00:03:00.000Z",
+          models: [],
+        } satisfies ServerProvider;
+
+        assert.deepStrictEqual(mergeProviderSnapshot(previousProvider, refreshedProvider).models, [
+          ...refreshedProvider.models,
+        ]);
+        assert.deepStrictEqual(mergeProviderSnapshot(previousProvider, pendingProvider).models, [
+          ...previousProvider.models,
+        ]);
+        assert.deepStrictEqual(mergeProviderSnapshot(previousProvider, failedProvider).models, [
+          ...previousProvider.models,
+        ]);
+      });
+
       it("drops stale OpenCode models missing from a successful refresh", () => {
         const previousProvider = {
           instanceId: ProviderInstanceId.make("opencode"),
