@@ -76,6 +76,12 @@ export interface AcpSpawnInput {
   readonly cwd?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly extendEnv?: boolean;
+  /**
+   * SIGTERM grace before SIGKILL when the runtime scope closes. Without it a
+   * deadlocked agent that never handles SIGTERM blocks scope close (and server
+   * shutdown) forever.
+   */
+  readonly forceKillAfter?: Duration.Input;
 }
 
 export interface AcpWebSocketInput {
@@ -473,6 +479,9 @@ export const make = (
               ...(spawn.cwd ? { cwd: spawn.cwd } : {}),
               ...(spawn.env ? { env: spawn.env } : {}),
               extendEnv: spawn.extendEnv ?? true,
+              ...(spawn.forceKillAfter !== undefined
+                ? { forceKillAfter: spawn.forceKillAfter }
+                : {}),
               shell: spawnCommand.shell,
             }),
           )
