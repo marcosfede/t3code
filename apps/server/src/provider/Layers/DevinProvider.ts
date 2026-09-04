@@ -34,6 +34,7 @@ import { makeDevinAcpRuntime } from "../acp/DevinAcpSupport.ts";
 import {
   buildDevinFamilyOptionDescriptors,
   buildDevinModelFamilies,
+  isCurrentDevinModelFamily,
 } from "../acp/DevinModelCatalog.ts";
 
 const DEVIN_PRESENTATION = {
@@ -153,6 +154,7 @@ export function buildDevinDiscoveredModelsFromSessionSetup(
       name: family.name,
       isCustom: false,
       ...(isDefault ? { isDefault: true } : {}),
+      ...(isCurrentDevinModelFamily(family.slug) ? {} : { isLegacy: true }),
       capabilities,
       ...(!isFlat ? { aliases: family.variants.map((variant) => variant.slug) } : {}),
     };
