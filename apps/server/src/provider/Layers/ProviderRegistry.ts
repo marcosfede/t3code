@@ -102,7 +102,9 @@ export function upsertProviderWorkspaceSnapshot(
 
 const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean => {
   const isAntigravity = provider.driver === ProviderDriverKind.make("antigravity");
-  if (!isAntigravity && provider.driver !== ProviderDriverKind.make("opencode")) {
+  const isOpenCode = provider.driver === ProviderDriverKind.make("opencode");
+  const isDevin = provider.driver === ProviderDriverKind.make("devin");
+  if (!isAntigravity && !isOpenCode && !isDevin) {
     return true;
   }
 
@@ -110,7 +112,7 @@ const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean =>
     return false;
   }
 
-  // Both drivers replace their inventories after successful catalog discovery.
+  // Dynamic inventories replace their models after successful catalog discovery.
   // Antigravity's local health check does not authenticate or discover models.
   const isPendingAntigravityAuthentication =
     isAntigravity && provider.status === "warning" && provider.auth.status === "unknown";
