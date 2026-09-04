@@ -36,6 +36,17 @@ On web and desktop, use Settings → Providers → **Models** to add an unlisted
 name and options. Only options supported by the provider integration affect turns. Antigravity
 uses its account catalog and does not support custom models.
 
+## Devin Cloud interruptions
+
+If the connection to Devin Cloud drops while your environment is running, T3 Code automatically
+reconnects to the same session. Your turn stays active while the connection recovers, and missed
+updates are restored without sending your message again. Idle cloud sessions reconnect too.
+
+You can still stop a turn during recovery. T3 Code sends the stop request to Devin Cloud once
+it reconnects; the cloud agent may continue working until then. If automatic recovery fails,
+the turn shows an error. Check the cloud session before resending work, because losing the
+connection does not necessarily stop the agent.
+
 ## Model defaults
 
 T3 Code remembers your provider, model, and model options for new threads. A

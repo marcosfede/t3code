@@ -96,10 +96,14 @@ export interface AcpSessionRuntimeOptions {
    * JSON-RPC frames. Exactly one of `spawn` or `webSocket` must be provided. */
   readonly webSocket?: AcpWebSocketInput;
   readonly cwd: string;
+  readonly acceptSessionUpdate?: (notification: EffectAcpSchema.SessionNotification) => boolean;
+  readonly onSessionUpdate?: (
+    notification: EffectAcpSchema.SessionNotification,
+  ) => Effect.Effect<void>;
   readonly resumeSessionId?: string;
   readonly resumeMethod?: "load" | "resume";
   readonly sessionLoadTimeout?: Duration.Input;
-  readonly sessionLoadReplayIdleGap?: Duration.Input;
+  readonly sessionLoadReplayIdleGap?: Duration.Input | null;
   /** Native cancellation waits for the prompt response and the getEvents consumer to drain. */
   readonly cancelBehavior?: "interrupt" | "wait-for-prompt";
   readonly cancelTimeout?: Duration.Input;
@@ -245,6 +249,7 @@ export class AcpSessionRuntime extends Context.Service<
     readonly getEvents: () => Stream.Stream<AcpSessionRuntimeEvent, never>;
     /** Waits for queued events to be processed, or for the runtime scope to close. */
     readonly drainEvents: Effect.Effect<void>;
+    readonly finishPrompt: Effect.Effect<void>;
     /** Latest mode state observed from session setup and `session/update` notifications. */
     readonly getModeState: Effect.Effect<AcpSessionModeState | undefined>;
     /** Latest configuration options observed from session setup and configuration writes. */
@@ -580,11 +585,22 @@ export const make = (
               }),
             );
           }
-          if (sessionUpdateIsReplay(notification)) {
+          const accepted = options.acceptSessionUpdate?.(notification);
+          if (options.onSessionUpdate) {
+            yield* options.onSessionUpdate(notification);
+          }
+          if (
+            accepted === false ||
+            (accepted === undefined && sessionUpdateIsReplay(notification))
+          ) {
             return;
           }
           const startState = yield* Ref.get(startStateRef);
           if (startState._tag === "Starting") {
+            if (accepted === true && notification.sessionId === options.resumeSessionId) {
+              yield* processSessionUpdate(notification);
+              return;
+            }
             if (isStartupMetadataUpdate(notification)) {
               yield* Ref.update(startupMetadataRef, (current) =>
                 [
@@ -843,9 +859,11 @@ export const make = (
             status: "started",
           });
 
-          const idleFiber = yield* waitForSessionLoadReplayIdle({
-            gateRef: sessionLoadGateRef,
-          }).pipe(Effect.forkIn(runtimeScope));
+          const idleFiber = yield* (
+            options.sessionLoadReplayIdleGap === null
+              ? Effect.never
+              : waitForSessionLoadReplayIdle({ gateRef: sessionLoadGateRef })
+          ).pipe(Effect.forkIn(runtimeScope));
           const loaded = yield* Effect.raceFirst(
             acp.agent.loadSession(loadPayload),
             Fiber.join(idleFiber),
@@ -1037,6 +1055,7 @@ export const make = (
       start: () => start,
       getEvents: () => Stream.fromQueue(eventQueue),
       drainEvents,
+      finishPrompt: closeActiveAssistantSegment({ queue: eventQueue, assistantSegmentRef }),
       getModeState: Ref.get(modeStateRef),
       getConfigOptions: Ref.get(configOptionsRef),
       prompt: (payload, promptOptions?) =>

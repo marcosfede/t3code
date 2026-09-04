@@ -10,6 +10,7 @@ import * as EffectAcpErrors from "effect-acp/errors";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
+import { makeDevinCloudReconnect } from "./DevinCloudReconnect.ts";
 
 const DEVIN_SESSION_TOKEN_PREFIX = "devin-session-token$";
 
@@ -123,19 +124,23 @@ export const makeDevinCloudAcpRuntime = (
   EffectAcpErrors.AcpError,
   Crypto.Crypto | Scope.Scope
 > =>
-  Effect.gen(function* () {
-    const acpContext = yield* Layer.build(
-      AcpSessionRuntime.layer({
-        ...input,
-        webSocket: { url: buildDevinCloudAcpWebSocketUrl(input.credentials) },
-        authMethodId: null,
-      }).pipe(
-        Layer.provide(
-          Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, input.childProcessSpawner),
+  makeDevinCloudReconnect(input, (connectionOptions) =>
+    Effect.gen(function* () {
+      const acpContext = yield* Layer.build(
+        AcpSessionRuntime.layer({
+          ...input,
+          ...connectionOptions,
+          webSocket: { url: buildDevinCloudAcpWebSocketUrl(input.credentials) },
+          authMethodId: null,
+          sessionLoadReplayIdleGap: null,
+        }).pipe(
+          Layer.provide(
+            Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, input.childProcessSpawner),
+          ),
         ),
-      ),
-    );
-    return yield* Effect.service(AcpSessionRuntime.AcpSessionRuntime).pipe(
-      Effect.provide(acpContext),
-    );
-  });
+      );
+      return yield* Effect.service(AcpSessionRuntime.AcpSessionRuntime).pipe(
+        Effect.provide(acpContext),
+      );
+    }),
+  );

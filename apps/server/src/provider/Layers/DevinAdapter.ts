@@ -689,18 +689,23 @@ export function makeDevinAdapter(
                       rawPayload: params,
                     }),
                   );
-                  const resolved = yield* Deferred.await(decision);
-                  pendingApprovals.delete(requestId);
-                  yield* offerRuntimeEvent(
-                    makeAcpRequestResolvedEvent({
-                      stamp: yield* makeEventStamp(),
-                      provider: provider,
-                      threadId: input.threadId,
-                      turnId,
-                      requestId: runtimeRequestId,
-                      permissionRequest,
-                      decision: resolved,
-                    }),
+                  const resolved = yield* Deferred.await(decision).pipe(
+                    Effect.onExit((exit) =>
+                      Effect.gen(function* () {
+                        pendingApprovals.delete(requestId);
+                        yield* offerRuntimeEvent(
+                          makeAcpRequestResolvedEvent({
+                            stamp: yield* makeEventStamp(),
+                            provider: provider,
+                            threadId: input.threadId,
+                            turnId,
+                            requestId: runtimeRequestId,
+                            permissionRequest,
+                            decision: Exit.isSuccess(exit) ? exit.value : "cancel",
+                          }),
+                        );
+                      }),
+                    ),
                   );
                   const selectedOptionId =
                     resolved === "cancel" ? undefined : selectPermissionOptionId(params, resolved);
