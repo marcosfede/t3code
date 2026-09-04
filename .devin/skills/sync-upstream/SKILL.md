@@ -1,7 +1,7 @@
 ---
 name: sync-upstream
-description: Keep this fork (marcosfede/t3code, branch devin) rebased on pingdotgg/t3code main. Use to check whether the fork is current, diagnose a failed "Sync upstream" workflow run, resolve rebase conflicts by hand in a throwaway worktree, verify, push, and bring a local checkout back in line. Also covers the fork's workflow-strip commit and where new fork commits go.
-argument-hint: "[status|sync|local]"
+description: Keep this fork (marcosfede/t3code, branch devin) rebased on pingdotgg/t3code main. Use to check whether the fork is current, diagnose a failed "Sync upstream" workflow run, resolve rebase conflicts by hand in a throwaway worktree, verify, push, ship a desktop build of the result via the fork release workflow without racing the sync, update the locally installed T3 Code app, and bring a local checkout back in line. Also covers the fork's workflow-strip commit and where new fork commits go.
+argument-hint: "[status|sync|release|install|local]"
 ---
 
 # Sync the fork with upstream
@@ -89,7 +89,62 @@ cd - && git worktree remove --force /tmp/t3-sync
 ```
 
 If new conflicts appear in the automated run right after your push, upstream landed more commits while you
-worked; repeat.
+worked; repeat. Once the automated run is green, continue with the desktop build below; the automated daily sync
+does not build anything.
+
+## After a sync: ship a desktop build
+
+A sync is not finished until a desktop build of the new `devin` exists. `.github/workflows/release-fork.yml`
+builds unsigned Linux x64 + macOS arm64 artifacts (about 6 minutes) and publishes them as a GitHub Release on
+the fork. Packaged builds carry an `app-update.yml` pointing at `marcosfede/t3code`, so installed CI builds
+self-update from these releases.
+
+Versioning: the fork has its own `0.1.x` line, which must stay above upstream's desktop version (`0.0.x`) so
+electron-updater treats fork builds as newer. Next version = latest fork release + 1 patch:
+`gh release list -R marcosfede/t3code --limit 1`.
+
+**Race condition.** The release workflow builds and tags `github.sha`, the tip of `devin` at dispatch time. If
+`devin` is force-pushed while it runs (the daily sync at 06:17 UTC, a manual sync, or another agent), that commit
+drops out of the branch history and the release points at an orphan, or the checkout fails. So:
+
+```bash
+gh run list -R marcosfede/t3code --workflow sync-upstream.yml --status in_progress   # must print nothing
+gh run list -R marcosfede/t3code --workflow sync-upstream.yml --status queued        # must print nothing
+git fetch origin devin && sha=$(git rev-parse origin/devin)
+gh workflow run release-fork.yml -R marcosfede/t3code --ref devin -f version=0.1.N
+sleep 10 && id=$(gh run list -R marcosfede/t3code --workflow release-fork.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+gh run watch "$id" -R marcosfede/t3code --exit-status
+# verify the release points at the commit you built and that it is still on devin
+target=$(gh release view "v0.1.N" -R marcosfede/t3code --json targetCommitish --jq .targetCommitish)
+[ "$target" = "$sha" ] && git merge-base --is-ancestor "$sha" origin/devin && echo ok
+```
+
+Do not push to `devin` or dispatch a sync until `gh run watch` returns. Avoid dispatching within a few minutes of
+06:17 UTC. If the check fails, delete and rebuild: `gh release delete v0.1.N -R marcosfede/t3code --cleanup-tag -y`,
+then dispatch again once `devin` is quiet.
+
+## Update the local T3 install
+
+The desktop app bundles the server, so updating the app updates both. The fork does not publish `npx t3` to npm.
+
+- Installed app: `/Applications/T3 Code (Alpha).app`. Version:
+  `defaults read "/Applications/T3 Code (Alpha).app/Contents/Info.plist" CFBundleShortVersionString`.
+- If `Contents/Resources/app-update.yml` exists, it is a CI build and self-updates: the app picks up the new release
+  on its next check, or use the in-app update action. Nothing else to do.
+- If that file is missing, the app was built locally and cannot self-update. Replace it once with the CI build;
+  afterwards it self-updates:
+
+  ```bash
+  gh release download v0.1.N -R marcosfede/t3code -p 'T3-Code-0.1.N-arm64.dmg' -D /tmp/t3-release --clobber
+  hdiutil attach /tmp/t3-release/T3-Code-0.1.N-arm64.dmg -nobrowse -mountpoint /Volumes/T3Code
+  rm -rf "/Applications/T3 Code (Alpha).app" && cp -R "/Volumes/T3Code/T3 Code (Alpha).app" /Applications/
+  hdiutil detach /Volumes/T3Code
+  xattr -dr com.apple.quarantine "/Applications/T3 Code (Alpha).app"   # unsigned build
+  ```
+
+  The app must be quit before it is replaced, and the developer is often driving you from it. Ask before quitting
+  it, and never kill it by pattern. User data lives in `~/Library/Application Support/T3 Code (Alpha)` and
+  `~/.t3`, which the reinstall does not touch.
 
 ## Bring a local checkout up to date
 
