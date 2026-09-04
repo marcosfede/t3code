@@ -265,13 +265,13 @@ describe("isCurrentDevinModelFamily", () => {
       "gpt-5-6-sol",
       "gemini-3-8-flash",
       "grok-4-6",
-      "swe-1-7",
       "fusion",
     ]) {
       expect(isCurrentDevinModelFamily(slug), slug).toBe(true);
     }
     for (const slug of [
       "claude-opus-4-6",
+      "swe-1-7",
       "MODEL_CLAUDE_4_5_OPUS",
       "claude-sonnet-4-5",
       "gpt-5-1",
