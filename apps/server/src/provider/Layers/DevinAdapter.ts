@@ -897,7 +897,12 @@ export function makeDevinAdapter(
             Effect.catch((cause) =>
               Effect.logError("Failed to process Devin runtime notification.", { cause }),
             ),
-            Effect.forkChild,
+            // Fork into the session scope, not the calling fiber: Effect
+            // interrupts a fiber's children when it completes, so a pump
+            // forked with `forkChild` dies with whichever fiber happened to
+            // start the session (a restart continuation, a recovering
+            // sendTurn) and every later notification is dropped.
+            Effect.forkIn(sessionScope),
           );
 
           ctx.notificationFiber = nf;
@@ -931,7 +936,7 @@ export function makeDevinAdapter(
               ),
             ),
             Effect.catch(() => Effect.void),
-            Effect.forkChild,
+            Effect.forkIn(sessionScope),
           );
           sessions.set(input.threadId, ctx);
           sessionScopeTransferred = true;

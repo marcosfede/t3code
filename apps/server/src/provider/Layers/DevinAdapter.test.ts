@@ -196,6 +196,42 @@ it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
     }),
   );
 
+  it.effect("keeps delivering notifications after the fiber that started the session ends", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-start-fiber-ended");
+      const wrapperPath = yield* Effect.promise(() => makeMockDevinWrapper());
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const contentDelta = yield* Deferred.make<void>();
+      const turnCompleted = yield* Deferred.make<void>();
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.type === "content.delta"
+          ? Deferred.succeed(contentDelta, undefined)
+          : event.type === "turn.completed"
+            ? Deferred.succeed(turnCompleted, undefined)
+            : Effect.void,
+      ).pipe(Effect.forkChild);
+
+      // A restart continuation or a recovering sendTurn starts the session
+      // from a fiber that finishes long before the thread does.
+      yield* adapter
+        .startSession({
+          threadId,
+          provider: ProviderDriverKind.make("devin"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.forkChild, Effect.flatMap(Fiber.join));
+
+      yield* adapter.sendTurn({ threadId, input: "hello devin", attachments: [] });
+
+      yield* Deferred.await(contentDelta);
+      yield* Deferred.await(turnCompleted);
+      yield* Fiber.interrupt(eventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("closes the ACP child process when a session stops", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("devin-stop-session-close");
