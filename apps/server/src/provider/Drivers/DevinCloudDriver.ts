@@ -28,11 +28,7 @@ import {
 } from "../ProviderDriver.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
-import {
-  makeManualOnlyProviderMaintenanceCapabilities,
-  makeStaticProviderMaintenanceResolver,
-  resolveProviderMaintenanceCapabilitiesEffect,
-} from "../providerMaintenance.ts";
+import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
 import {
   haveProviderSnapshotSettingsChanged,
   makeProviderSnapshotSettingsSource,
@@ -47,12 +43,10 @@ import { type DevinAcpRuntimeFactory } from "../acp/DevinAcpSupport.ts";
 const decodeDevinCloudSettings = Schema.decodeSync(DevinCloudSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("devinCloud");
-const UPDATE = makeStaticProviderMaintenanceResolver(
-  makeManualOnlyProviderMaintenanceCapabilities({
-    provider: DRIVER_KIND,
-    packageName: null,
-  }),
-);
+const maintenanceCapabilities = makeManualOnlyProviderMaintenanceCapabilities({
+  provider: DRIVER_KIND,
+  packageName: null,
+});
 
 export type DevinCloudDriverEnv =
   | BackgroundPolicy.BackgroundPolicy
@@ -107,9 +101,6 @@ export const DevinCloudDriver: ProviderDriver<DevinCloudSettings, DevinCloudDriv
         continuationGroupKey: continuationIdentity.continuationKey,
       });
       const effectiveConfig = { ...config, enabled } satisfies DevinCloudSettings;
-      const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
-        env: processEnv,
-      });
 
       const makeAcpRuntime: DevinAcpRuntimeFactory = (runtimeInput) =>
         loadDevinCloudCredentials(effectiveConfig, processEnv).pipe(
@@ -138,7 +129,7 @@ export const DevinCloudDriver: ProviderDriver<DevinCloudSettings, DevinCloudDriv
       const snapshot = yield* makeManagedServerProvider<
         ProviderSnapshotSettings<DevinCloudSettings>
       >({
-        maintenanceCapabilities,
+        resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
         getSettings: snapshotSettings.getSettings,
         streamSettings: snapshotSettings.streamSettings,
         haveSettingsChanged: haveProviderSnapshotSettingsChanged,

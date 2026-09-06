@@ -26,6 +26,21 @@ const emptyFileSystem = FileSystem.layerNoop({
 });
 
 describe("buildInitialDevinCloudProviderSnapshot", () => {
+  it.effect("preserves custom model names and capabilities from structured settings", () =>
+    Effect.gen(function* () {
+      const capabilities = { optionDescriptors: [] };
+      const snapshot = yield* buildInitialDevinCloudProviderSnapshot(
+        decodeSettings({
+          customModels: ["bare-slug", { slug: "named", name: "Named", capabilities }],
+        }),
+      );
+      expect(snapshot.models.filter((model) => model.isCustom)).toEqual([
+        expect.objectContaining({ slug: "bare-slug", name: "bare-slug" }),
+        expect.objectContaining({ slug: "named", name: "Named", capabilities }),
+      ]);
+    }),
+  );
+
   it.effect("reports a disabled provider without probing", () =>
     Effect.gen(function* () {
       const snapshot = yield* buildInitialDevinCloudProviderSnapshot(

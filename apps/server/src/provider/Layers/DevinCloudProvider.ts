@@ -77,7 +77,7 @@ const DEVIN_CLOUD_BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
 ];
 
 function devinCloudModels(
-  customModels: ReadonlyArray<string> | undefined,
+  customModels: DevinCloudSettings["customModels"] | undefined,
 ): ReadonlyArray<ServerProviderModel> {
   return providerModelsFromSettings(
     DEVIN_CLOUD_BUILT_IN_MODELS,

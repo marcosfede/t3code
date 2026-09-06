@@ -100,7 +100,7 @@ export function buildInitialDevinProviderSnapshot(
 }
 
 function devinModelsFromSettings(
-  customModels: ReadonlyArray<string> | undefined,
+  customModels: DevinSettings["customModels"] | undefined,
   builtInModels: ReadonlyArray<ServerProviderModel> = DEVIN_BUILT_IN_MODELS,
 ): ReadonlyArray<ServerProviderModel> {
   return providerModelsFromSettings(builtInModels, customModels ?? [], EMPTY_CAPABILITIES);
