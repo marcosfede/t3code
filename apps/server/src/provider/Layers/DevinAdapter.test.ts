@@ -29,6 +29,7 @@ import {
 
 import { ServerConfig } from "../../config.ts";
 import type * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
+import { makeDevinAcpRuntime } from "../acp/DevinAcpSupport.ts";
 import {
   devinPromptSettlementBelongsToContext,
   isAcpConnectionLostError,
@@ -43,7 +44,7 @@ const mockAgentCommand = process.execPath;
 async function makeMockDevinWrapper(extraEnv?: Record<string, string>) {
   const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-mock-"));
   const wrapperPath = NodePath.join(dir, "fake-devin.sh");
-  const envExports = Object.entries(extraEnv ?? {})
+  const envExports = Object.entries({ T3_ACP_COMPLETE_HANGING_PROMPT_ON_CANCEL: "1", ...extraEnv })
     .map(([key, value]) => `export ${key}=${JSON.stringify(value)}`)
     .join("\n");
   const script = `#!/bin/sh
@@ -528,6 +529,145 @@ it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
       yield* Fiber.interrupt(runtimeEventsFiber);
       yield* adapter.stopSession(threadId);
     }).pipe(TestClock.withLive),
+  );
+
+  for (const action of ["steer", "interrupt"] as const) {
+    it.effect(`waits for Devin cancellation before a replacement message after ${action}`, () =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make(`devin-native-cancel-${action}`);
+        const wrapperPath = yield* Effect.promise(() =>
+          makeMockDevinWrapper({ T3_ACP_COMPLETE_FIRST_PROMPT_ON_CANCEL: "1" }),
+        );
+        const runtimeReady = yield* Deferred.make<AcpSessionRuntime.AcpSessionRuntime["Service"]>();
+        const toolStarted = yield* Deferred.make<void>();
+        const cancelReceived = yield* Deferred.make<void>();
+        const replacementCompleted = yield* Deferred.make<void>();
+        const promptStatuses: string[] = [];
+        const completions: ProviderRuntimeEvent[] = [];
+        const adapter = yield* makeTestAdapter(wrapperPath, {
+          makeAcpRuntime: (input) =>
+            makeDevinAcpRuntime({
+              ...input,
+              devinSettings: { binaryPath: wrapperPath },
+              requestLogger: (event) =>
+                Effect.sync(() => {
+                  if (event.method === "session/prompt") promptStatuses.push(event.status);
+                }),
+              onSessionUpdate: (notification) =>
+                Effect.gen(function* () {
+                  yield* input.onSessionUpdate?.(notification) ?? Effect.void;
+                  const update = notification.update;
+                  if (update.sessionUpdate === "tool_call") {
+                    yield* Deferred.succeed(toolStarted, undefined);
+                  }
+                  if (
+                    update.sessionUpdate === "agent_thought_chunk" &&
+                    update.content.type === "text" &&
+                    update.content.text === "native-cancel-received"
+                  ) {
+                    yield* Deferred.succeed(cancelReceived, undefined);
+                  }
+                }),
+            }).pipe(Effect.tap((runtime) => Deferred.succeed(runtimeReady, runtime))),
+        });
+        yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.gen(function* () {
+            if (event.type !== "turn.completed") return;
+            completions.push(event);
+            if (event.payload.state === "completed") {
+              yield* Deferred.succeed(replacementCompleted, undefined);
+            }
+          }),
+        ).pipe(Effect.forkChild);
+        yield* adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("devin"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+        const runtime = yield* Deferred.await(runtimeReady);
+        const first = yield* adapter
+          .sendTurn({ threadId, input: "original message", attachments: [] })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(toolStarted);
+        const replacement = yield* Effect.gen(function* () {
+          if (action === "interrupt") yield* adapter.interruptTurn(threadId);
+          return yield* adapter.sendTurn({
+            threadId,
+            input: "replacement message",
+            attachments: [],
+          });
+        }).pipe(Effect.forkChild);
+        yield* Deferred.await(cancelReceived);
+        yield* runtime.request("_test/finish-cancel", {});
+        const originalTurn = yield* Fiber.join(first);
+        const replacementTurn = yield* Fiber.join(replacement);
+        yield* Deferred.await(replacementCompleted);
+        assert.deepEqual(promptStatuses, ["started", "succeeded", "started", "succeeded"]);
+        assert.equal(originalTurn.turnId === replacementTurn.turnId, action === "steer");
+        assert.lengthOf(completions, action === "steer" ? 1 : 2);
+        yield* adapter.stopSession(threadId);
+      }),
+    );
+  }
+
+  it.effect("retires Devin when cancellation is never acknowledged instead of reusing it", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-cancel-timeout");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({ T3_ACP_COMPLETE_FIRST_PROMPT_ON_CANCEL: "1" }),
+      );
+      const toolStarted = yield* Deferred.make<void>();
+      const cancelReceived = yield* Deferred.make<void>();
+      const sessionExited = yield* Deferred.make<void>();
+      let promptRequests = 0;
+      const adapter = yield* makeTestAdapter(wrapperPath, {
+        makeAcpRuntime: (input) =>
+          makeDevinAcpRuntime({
+            ...input,
+            devinSettings: { binaryPath: wrapperPath },
+            requestLogger: (event) =>
+              Effect.sync(() => {
+                if (event.method === "session/prompt" && event.status === "started") {
+                  promptRequests += 1;
+                }
+              }),
+            onSessionUpdate: (notification) =>
+              Effect.gen(function* () {
+                yield* input.onSessionUpdate?.(notification) ?? Effect.void;
+                if (notification.update.sessionUpdate === "tool_call") {
+                  yield* Deferred.succeed(toolStarted, undefined);
+                }
+                if (notification.update.sessionUpdate === "agent_thought_chunk") {
+                  yield* Deferred.succeed(cancelReceived, undefined);
+                }
+              }),
+          }),
+      });
+      yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.type === "session.exited" ? Deferred.succeed(sessionExited, undefined) : Effect.void,
+      ).pipe(Effect.forkChild);
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const first = yield* adapter
+        .sendTurn({ threadId, input: "stuck prompt", attachments: [] })
+        .pipe(Effect.result, Effect.forkChild);
+      yield* Deferred.await(toolStarted);
+      const replacement = yield* adapter
+        .sendTurn({ threadId, input: "replacement message", attachments: [] })
+        .pipe(Effect.result, Effect.forkChild);
+      yield* Deferred.await(cancelReceived);
+      yield* TestClock.adjust("15 seconds");
+      assert.equal((yield* Fiber.join(first))._tag, "Failure");
+      assert.equal((yield* Fiber.join(replacement))._tag, "Failure");
+      yield* Deferred.await(sessionExited);
+      assert.equal(promptRequests, 1);
+      assert.deepEqual(yield* adapter.listSessions(), []);
+    }),
   );
 
   it.effect("cancels an in-flight prompt when a mid-turn sendTurn steers", () =>

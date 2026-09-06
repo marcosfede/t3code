@@ -33,6 +33,7 @@ const emitActiveToolThenHang = process.env.T3_ACP_EMIT_ACTIVE_TOOL_THEN_HANG ===
 const emitForeignSessionUpdates = process.env.T3_ACP_EMIT_FOREIGN_SESSION_UPDATES === "1";
 const waitForResumeRelease = process.env.T3_ACP_WAIT_FOR_RESUME_RELEASE === "1";
 const completeFirstPromptOnCancel = process.env.T3_ACP_COMPLETE_FIRST_PROMPT_ON_CANCEL === "1";
+const completeHangingPromptOnCancel = process.env.T3_ACP_COMPLETE_HANGING_PROMPT_ON_CANCEL === "1";
 const floodStderr = process.env.T3_ACP_FLOOD_STDERR === "1";
 const hangPromptForever = process.env.T3_ACP_HANG_PROMPT_FOREVER === "1";
 const exitAfterSessionMs = Number(process.env.T3_ACP_EXIT_AFTER_SESSION_MS ?? "0");
@@ -594,6 +595,9 @@ const program = Effect.gen(function* () {
     Effect.gen(function* () {
       const cancelledSessionId = String(sessionId ?? "mock-session-1");
       cancelledSessions.add(cancelledSessionId);
+      if (completeHangingPromptOnCancel) {
+        yield* Deferred.succeed(nativeCancelRequested, undefined);
+      }
       if (completeFirstPromptOnCancel) {
         yield* Deferred.succeed(nativeCancelRequested, undefined);
         yield* agent.client.sessionUpdate({
@@ -718,6 +722,10 @@ const program = Effect.gen(function* () {
       }
 
       if (hangPromptForever || (hangFirstPromptForever && promptCount === 1)) {
+        if (completeHangingPromptOnCancel) {
+          yield* Deferred.await(nativeCancelRequested);
+          return { stopReason: "cancelled" };
+        }
         return yield* Effect.never;
       }
 
