@@ -116,6 +116,9 @@ interface DevinSessionContext {
   activeTurnId: TurnId | undefined;
   /** Turns already interrupted; late prompt RPCs must not resurrect them. */
   interruptedTurnIds: Set<TurnId>;
+  /** Turn each tool call started in. Devin Cloud keeps running a stopped
+   * turn's commands and reports their completion during the next turn. */
+  readonly toolCallTurnIds: Map<string, TurnId>;
   /** Number of sendTurn prompts currently in flight or being prepared.
    * >0 means a turn is actively running, so a new sendTurn is a steer that
    * cancels the in-flight prompt and continues the same turn. Only the last
@@ -783,6 +786,7 @@ export function makeDevinAdapter(
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
             interruptedTurnIds: new Set(),
+            toolCallTurnIds: new Map(),
             promptsInFlight: 0,
             promptEpoch: 0,
             discardBeforeEpoch: 0,
@@ -855,7 +859,11 @@ export function makeDevinAdapter(
                       "session/update",
                     );
                     return;
-                  case "ToolCallUpdated":
+                  case "ToolCallUpdated": {
+                    const toolCallId = event.toolCall.toolCallId;
+                    const ownerTurnId = ctx.toolCallTurnIds.get(toolCallId) ?? notificationTurnId;
+                    if (ownerTurnId !== notificationTurnId) return;
+                    ctx.toolCallTurnIds.set(toolCallId, ownerTurnId);
                     yield* offerRuntimeEvent(
                       makeAcpToolCallEvent({
                         stamp,
@@ -867,6 +875,7 @@ export function makeDevinAdapter(
                       }),
                     );
                     return;
+                  }
                   case "ContentDelta":
                     yield* offerRuntimeEvent(
                       makeAcpContentDeltaEvent({

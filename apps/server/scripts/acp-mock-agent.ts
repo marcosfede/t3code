@@ -39,6 +39,8 @@ const hangPromptForever = process.env.T3_ACP_HANG_PROMPT_FOREVER === "1";
 const exitAfterSessionMs = Number(process.env.T3_ACP_EXIT_AFTER_SESSION_MS ?? "0");
 const hangFirstPromptForever = process.env.T3_ACP_HANG_FIRST_PROMPT_FOREVER === "1";
 const emitLateUpdateAfterCancel = process.env.T3_ACP_EMIT_LATE_UPDATE_AFTER_CANCEL === "1";
+const finishCancelledToolInNextPrompt =
+  process.env.T3_ACP_FINISH_CANCELLED_TOOL_IN_NEXT_PROMPT === "1";
 const omitXAiPromptCompleteStopReason =
   process.env.T3_ACP_OMIT_XAI_PROMPT_COMPLETE_STOP_REASON === "1";
 const failLoadSession = process.env.T3_ACP_FAIL_LOAD_SESSION === "1";
@@ -719,6 +721,42 @@ const program = Effect.gen(function* () {
           });
         }
         return yield* Effect.never;
+      }
+
+      // Devin Cloud detaches the prompt on cancel but keeps running the tool;
+      // its completion shows up while the next prompt is being answered.
+      if (finishCancelledToolInNextPrompt && promptCount === 1) {
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "cancelled-tool",
+            title: "sleep 45 && echo slept",
+            kind: "execute",
+            status: "in_progress",
+          },
+        });
+        yield* Deferred.await(nativeCancelRequested);
+        return { stopReason: "cancelled" };
+      }
+      if (finishCancelledToolInNextPrompt && promptCount === 2) {
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "cancelled-tool",
+            status: "completed",
+            content: [{ type: "content", content: { type: "text", text: "slept" } }],
+          },
+        });
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "pong" },
+          },
+        });
+        return { stopReason: "end_turn" };
       }
 
       if (hangPromptForever || (hangFirstPromptForever && promptCount === 1)) {

@@ -1001,6 +1001,68 @@ it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
     }).pipe(TestClock.withLive),
   );
 
+  it.effect("keeps a stopped turn's tool completion off the next turn", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-stopped-tool-finishes-later");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({ T3_ACP_FINISH_CANCELLED_TOOL_IN_NEXT_PROMPT: "1" }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const toolStarted = yield* Deferred.make<TurnId>();
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }).pipe(
+          Effect.andThen(
+            event.type === "item.updated" &&
+              String(event.itemId) === "cancelled-tool" &&
+              event.turnId !== undefined
+              ? Deferred.succeed(toolStarted, event.turnId).pipe(Effect.asVoid)
+              : Effect.void,
+          ),
+        ),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      const firstTurn = yield* adapter
+        .sendTurn({ threadId, input: "run a long command", attachments: [] })
+        .pipe(Effect.forkChild);
+      const firstTurnId = yield* Deferred.await(toolStarted).pipe(Effect.timeout("2 seconds"));
+      yield* adapter.interruptTurn(threadId, firstTurnId).pipe(Effect.timeout("2 seconds"));
+      yield* Fiber.join(firstTurn).pipe(Effect.timeout("2 seconds"));
+
+      yield* adapter
+        .sendTurn({ threadId, input: "Reply with exactly: pong", attachments: [] })
+        .pipe(Effect.timeout("2 seconds"));
+
+      const secondTurnId = runtimeEvents.find(
+        (event) => event.type === "turn.started" && event.turnId !== firstTurnId,
+      )?.turnId;
+      assert.isDefined(secondTurnId);
+      const secondTurnEvents = runtimeEvents.filter((event) => event.turnId === secondTurnId);
+      assert.deepEqual(
+        secondTurnEvents.filter((event) => String(event.itemId) === "cancelled-tool"),
+        [],
+      );
+      assert.isTrue(
+        secondTurnEvents.some(
+          (event) => event.type === "content.delta" && event.payload.delta === "pong",
+        ),
+      );
+
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      yield* adapter.stopSession(threadId);
+    }).pipe(TestClock.withLive),
+  );
+
   it.effect("settles the in-flight prompt before emitting completion", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("devin-completion-before-next-turn");
