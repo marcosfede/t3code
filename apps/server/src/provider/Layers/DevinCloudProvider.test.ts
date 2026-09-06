@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
+import { WebSocketServer } from "ws";
 
 import {
   buildInitialDevinCloudProviderSnapshot,
@@ -12,18 +13,69 @@ import {
 
 const decodeSettings = Schema.decodeSync(DevinCloudSettings);
 
-const emptyFileSystem = FileSystem.layerNoop({
-  readFileString: (path) =>
-    Effect.fail(
-      PlatformError.systemError({
-        _tag: "NotFound",
-        module: "FileSystem",
-        method: "readFileString",
-        description: "no such file",
-        pathOrDescriptor: path,
-      }),
-    ),
-});
+const fileSystemWith = (files: Record<string, string>) =>
+  FileSystem.layerNoop({
+    readFileString: (path) =>
+      path in files
+        ? Effect.succeed(files[path]!)
+        : Effect.fail(
+            PlatformError.systemError({
+              _tag: "NotFound",
+              module: "FileSystem",
+              method: "readFileString",
+              description: "no such file",
+              pathOrDescriptor: path,
+            }),
+          ),
+  });
+
+const emptyFileSystem = fileSystemWith({});
+
+/** ACP relay stand-in that drops the first `refuse` handshakes, then answers `initialize`. */
+const makeRelay = (refuse: number) =>
+  Effect.gen(function* () {
+    const server = yield* Effect.acquireRelease(
+      Effect.sync(() => new WebSocketServer({ host: "127.0.0.1", port: 0 })),
+      (server) =>
+        Effect.callback<void>((resume) => {
+          for (const socket of server.clients) socket.terminate();
+          server.close(() => resume(Effect.void));
+        }),
+    );
+    let connections = 0;
+    server.on("connection", (socket) => {
+      if (connections++ < refuse) {
+        socket.terminate();
+        return;
+      }
+      socket.on("message", (data) => {
+        const request = JSON.parse(String(data)) as { id?: number; method?: string };
+        if (request.method !== "initialize") return;
+        socket.send(
+          `${JSON.stringify({
+            jsonrpc: "2.0",
+            id: request.id,
+            result: {
+              protocolVersion: 1,
+              agentCapabilities: {},
+              authMethods: [],
+              agentInfo: { name: "devin", version: "relay-test" },
+            },
+          })}\n`,
+        );
+      });
+    });
+    yield* Effect.callback<void>((resume) => {
+      server.once("listening", () => resume(Effect.void));
+    });
+    const address = server.address();
+    if (address === null || typeof address === "string")
+      return yield* Effect.die("No relay address");
+    return {
+      credentialsToml: `api_key = "devin-session-token$test"\ndevin_api_url = "http://127.0.0.1:${address.port}"\n`,
+      connections: () => connections,
+    };
+  });
 
 describe("buildInitialDevinCloudProviderSnapshot", () => {
   it.effect("preserves custom model names and capabilities from structured settings", () =>
@@ -81,5 +133,32 @@ describe("checkDevinCloudProviderStatus", () => {
       expect(snapshot.status).toBe("disabled");
       expect(snapshot.message).toContain("disabled");
     }).pipe(Effect.provide(FileSystem.layerNoop({}))),
+  );
+
+  it.live("stays ready when the relay drops a handshake that a retry completes", () =>
+    Effect.gen(function* () {
+      const relay = yield* makeRelay(1);
+      const snapshot = yield* checkDevinCloudProviderStatus(
+        decodeSettings({ credentialsPath: "/relay/credentials.toml" }),
+        {},
+      ).pipe(Effect.provide(fileSystemWith({ "/relay/credentials.toml": relay.credentialsToml })));
+      expect(relay.connections()).toBe(2);
+      expect(snapshot.status).toBe("ready");
+      expect(snapshot.auth.status).toBe("authenticated");
+      expect(snapshot.version).toBe("relay-test");
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("reports an outage once retries are exhausted", () =>
+    Effect.gen(function* () {
+      const relay = yield* makeRelay(Number.POSITIVE_INFINITY);
+      const snapshot = yield* checkDevinCloudProviderStatus(
+        decodeSettings({ credentialsPath: "/relay/credentials.toml" }),
+        {},
+      ).pipe(Effect.provide(fileSystemWith({ "/relay/credentials.toml": relay.credentialsToml })));
+      expect(relay.connections()).toBe(3);
+      expect(snapshot.status).toBe("error");
+      expect(snapshot.message).toContain("Could not reach");
+    }).pipe(Effect.scoped),
   );
 });

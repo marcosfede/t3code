@@ -24,7 +24,7 @@ type PendingPrompt = {
   recovering: boolean;
 };
 
-const isConnectionLost = (error: AcpErrors.AcpError) =>
+export const isConnectionLost = (error: AcpErrors.AcpError) =>
   error._tag === "AcpProcessExitedError" ||
   error._tag === "AcpTransportError" ||
   error._tag === "AcpInputStreamEndedError" ||
@@ -87,6 +87,9 @@ export const makeDevinCloudReconnect = Effect.fn("makeDevinCloudReconnect")(func
   // status update shortly after. A prompt that reaches Cloud between the two is answered
   // with an immediate end_turn and never runs, so cancellation holds until that status
   // lands (or a bounded wait elapses, should Cloud ever stop sending it).
+  // Cancelling only detaches the prompt: Devin keeps executing whatever it was doing
+  // (a running shell command finishes, remaining plan steps still run) and reports that
+  // work inside the next prompt. Cloud exposes no stronger stop.
   const cancelSession = (runtime: Runtime) =>
     Effect.gen(function* () {
       const idle = yield* Deferred.make<void>();

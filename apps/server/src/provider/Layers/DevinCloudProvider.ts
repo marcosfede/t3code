@@ -12,6 +12,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
+import * as Schedule from "effect/Schedule";
 import { HttpClient } from "effect/unstable/http";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import * as EffectAcpClient from "effect-acp/client";
@@ -30,6 +31,7 @@ import {
   buildDevinCloudAcpWebSocketUrl,
   loadDevinCloudCredentials,
 } from "../acp/DevinCloudAcpSupport.ts";
+import { isConnectionLost } from "../acp/DevinCloudReconnect.ts";
 
 const DEVIN_CLOUD_PRESENTATION = {
   displayName: "Devin Cloud",
@@ -126,7 +128,9 @@ export function buildInitialDevinCloudProviderSnapshot(
 }
 
 /** Connects to the cloud ACP relay and performs `initialize` only — never
- * `session/new`, which would create a real cloud session per probe. */
+ * `session/new`, which would create a real cloud session per probe. A verdict
+ * stands until the next health refresh, so a dropped handshake is retried
+ * rather than reported as an outage while live sessions reconnect fine. */
 const probeDevinCloudAcp = (webSocketUrl: string) =>
   Effect.gen(function* () {
     const stdioHandle = yield* connectAcpWebSocketStdio(webSocketUrl);
@@ -142,7 +146,10 @@ const probeDevinCloudAcp = (webSocketUrl: string) =>
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
       clientInfo: { name: "t3-code-provider-probe", version: "0.0.0" },
     });
-  }).pipe(Effect.scoped);
+  }).pipe(
+    Effect.scoped,
+    Effect.retry({ times: 2, schedule: Schedule.spaced("1 second"), while: isConnectionLost }),
+  );
 
 export const checkDevinCloudProviderStatus = Effect.fn("checkDevinCloudProviderStatus")(function* (
   cloudSettings: DevinCloudSettings,
