@@ -317,6 +317,42 @@ it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
     }),
   );
 
+  it.effect("keeps the turn running when the sendTurn caller is interrupted mid-prompt", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-send-turn-caller-interrupted");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({ T3_ACP_EMIT_CONTENT_THEN_HANG: "1" }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const contentDelta = yield* Deferred.make<void>();
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.type === "content.delta" ? Deferred.succeed(contentDelta, undefined) : Effect.void,
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const sendTurnFiber = yield* adapter
+        .sendTurn({ threadId, input: "keep streaming", attachments: [] })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(contentDelta);
+
+      yield* Fiber.interrupt(sendTurnFiber);
+
+      const session = (yield* adapter.listSessions()).find(
+        (session) => session.threadId === threadId,
+      );
+      assert.equal(session?.status, "running");
+      assert.isDefined(session?.activeTurnId);
+
+      yield* Fiber.interrupt(eventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("restores ready without completing an unstarted turn when preparation fails", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("devin-preparation-failure-while-connecting");

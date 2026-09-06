@@ -13,6 +13,7 @@ import {
   type ThreadId,
   TurnId,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -1338,9 +1339,16 @@ export function makeDevinAdapter(
             }),
           );
         }).pipe(
-          Effect.ensuring(
+          Effect.onExit((exit) =>
             Effect.gen(function* () {
               if (yield* Ref.get(promptSettled)) {
+                return;
+              }
+
+              // Only server shutdown interrupts a sendTurn caller. Devin Cloud keeps
+              // running the prompt, so the turn stays active for stopAll to record
+              // and a restart to continue instead of being settled as failed.
+              if (Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)) {
                 return;
               }
 
