@@ -24,6 +24,7 @@ import {
 } from "@t3tools/contracts";
 import { ServerConfig } from "../../config.ts";
 import { makeDevinAdapter } from "../Layers/DevinAdapter.ts";
+import type { AcpToolCallState } from "./AcpRuntimeModel.ts";
 
 import {
   buildDevinCloudAcpWebSocketUrl,
@@ -157,16 +158,14 @@ const decodeRequest = Schema.decodeUnknownSync(
   ),
 );
 
-const sendUpdate = (
-  socket: WebSocket,
-  update: AcpSchema.SessionNotification["update"],
-  replay = false,
-) =>
+// Cloud replays history on session/load exactly like live updates: same shape, no
+// replay marker, only the `cognition.ai/eventId` identifies an already-seen event.
+const sendUpdate = (socket: WebSocket, update: AcpSchema.SessionNotification["update"]) =>
   socket.send(
     encodeJson({
       jsonrpc: "2.0",
       method: "session/update",
-      params: { sessionId, update, ...(replay ? { _meta: { isReplay: true } } : {}) },
+      params: { sessionId, update },
     }),
   );
 
@@ -262,8 +261,10 @@ const makeCloudServer = (
     const deltas: string[] = [];
     const receivedDelta = yield* Queue.unbounded<string>();
     const activeItems = new Set<string>();
+    const toolCalls: AcpToolCallState[] = [];
     const eventsFiber = yield* Stream.runForEach(runtime.getEvents(), (event) =>
       Effect.gen(function* () {
+        if (event._tag === "ToolCallUpdated") toolCalls.push(event.toolCall);
         if (event._tag === "AssistantItemStarted") activeItems.add(event.itemId);
         if (event._tag === "AssistantItemCompleted") activeItems.delete(event.itemId);
         if (event._tag === "EventStreamBarrier")
@@ -289,6 +290,7 @@ const makeCloudServer = (
       activeItems,
       eventsFiber,
       receivedDelta,
+      toolCalls,
     };
   });
 
@@ -389,7 +391,7 @@ describe("Devin Cloud reconnection", () => {
   it.live("settles a turn that finished while disconnected using the loaded session status", () =>
     Effect.gen(function* () {
       const server = yield* makeCloudServer((socket, request) => {
-        sendUpdate(socket, messageUpdate("final", "finished while offline"), true);
+        sendUpdate(socket, messageUpdate("final", "finished while offline"));
         socket.send(
           encodeJson({
             jsonrpc: "2.0",
@@ -416,13 +418,12 @@ describe("Devin Cloud reconnection", () => {
   it.live("uses a missed terminal replay event when the load snapshot is older", () =>
     Effect.gen(function* () {
       const server = yield* makeCloudServer((socket) => {
-        sendUpdate(socket, messageUpdate("final", "done"), true);
+        sendUpdate(socket, messageUpdate("final", "done"));
         const update = statusUpdate("finished");
-        sendUpdate(
-          socket,
-          { ...update, _meta: { ...update._meta, "cognition.ai/eventId": "terminal" } },
-          true,
-        );
+        sendUpdate(socket, {
+          ...update,
+          _meta: { ...update._meta, "cognition.ai/eventId": "terminal" },
+        });
       });
       const prompt = yield* server.runtime
         .prompt({ prompt: [{ type: "text", text: "work" }] })
@@ -468,6 +469,7 @@ describe("Devin Cloud reconnection", () => {
       const load = server.requests.find((request) => request.method === "session/load")!;
       replacement.send(encodeJson({ jsonrpc: "2.0", id: load.id, result: {} }));
       yield* Queue.take(server.cancellations);
+      sendUpdate(replacement, statusUpdate("blocked"));
       const next = yield* server.runtime
         .prompt({ prompt: [{ type: "text", text: "next" }] })
         .pipe(Effect.forkScoped);
@@ -576,8 +578,8 @@ describe("Devin Cloud reconnection", () => {
   it.live("reconnects an active prompt without resending it and replays only missed messages", () =>
     Effect.gen(function* () {
       const server = yield* makeCloudServer((socket) => {
-        sendUpdate(socket, messageUpdate("old", "before disconnect"), true);
-        sendUpdate(socket, messageUpdate("new", "during disconnect"), true);
+        sendUpdate(socket, messageUpdate("old", "before disconnect"));
+        sendUpdate(socket, messageUpdate("new", "during disconnect"));
       });
       const prompt = yield* server.runtime
         .prompt({ prompt: [{ type: "text", text: "work" }] })
@@ -599,6 +601,53 @@ describe("Devin Cloud reconnection", () => {
       expect(
         server.requests.find((request) => request.method === "session/load")?.params?.sessionId,
       ).toBe(sessionId);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("holds cancellation until Cloud reports the session idle", () =>
+    Effect.gen(function* () {
+      const server = yield* makeCloudServer();
+      const prompt = yield* server.runtime
+        .prompt({ prompt: [{ type: "text", text: "work" }] })
+        .pipe(Effect.forkScoped);
+      const socket = yield* Queue.take(server.prompts);
+      const cancel = yield* server.runtime.cancel.pipe(Effect.forkScoped);
+      yield* Queue.take(server.cancellations);
+      const request = server.requests.findLast((request) => request.method === "session/prompt")!;
+      socket.send(
+        encodeJson({ jsonrpc: "2.0", id: request.id, result: { stopReason: "cancelled" } }),
+      );
+      expect((yield* Fiber.join(prompt)).stopReason).toBe("cancelled");
+      yield* server.runtime.drainEvents;
+      expect(cancel.pollUnsafe()).toBeUndefined();
+      sendUpdate(socket, statusUpdate("blocked"));
+      yield* Fiber.join(cancel);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("emits a tool call's completion once even when Cloud reports it twice", () =>
+    Effect.gen(function* () {
+      const server = yield* makeCloudServer();
+      const socket = yield* Queue.take(server.connections);
+      const toolCall = (
+        sessionUpdate: "tool_call" | "tool_call_update",
+        status: "in_progress" | "completed",
+      ): AcpSchema.SessionNotification["update"] => ({
+        sessionUpdate,
+        toolCallId: "shell",
+        title: "sleep 1",
+        kind: "execute",
+        status,
+      });
+      sendUpdate(socket, toolCall("tool_call", "in_progress"));
+      sendUpdate(socket, toolCall("tool_call_update", "completed"));
+      sendUpdate(socket, toolCall("tool_call_update", "completed"));
+      sendUpdate(socket, messageUpdate("after", "after the tool"));
+      expect(yield* Queue.take(server.receivedDelta)).toBe("after the tool");
+      expect(server.toolCalls.map((toolCall) => toolCall.status)).toEqual([
+        "inProgress",
+        "completed",
+      ]);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 

@@ -27,6 +27,7 @@ import {
   decideToolCallUpdateEmission,
   extractModelConfigId,
   findSessionConfigOption,
+  isTerminalToolCallStatus,
   mergeToolCallState,
   toolCallProgressLength,
   parseSessionModeState,
@@ -1251,8 +1252,14 @@ const handleSessionUpdate = ({
             skippedSinceEmit: tracked?.skippedSinceEmit ?? 0,
           });
           const next = new Map(current);
-          if (nextToolCall.status === "completed" || nextToolCall.status === "failed") {
-            next.delete(nextToolCall.toolCallId);
+          if (nextToolCall.status && isTerminalToolCallStatus(nextToolCall.status)) {
+            // Remember only that it finished, so late updates are dropped
+            // without holding onto the tool output.
+            next.set(nextToolCall.toolCallId, {
+              state: { toolCallId: nextToolCall.toolCallId, status: nextToolCall.status, data: {} },
+              lastEmittedDetailLength: undefined,
+              skippedSinceEmit: 0,
+            });
           } else {
             next.set(nextToolCall.toolCallId, {
               state: nextToolCall,

@@ -747,6 +747,26 @@ describe("AcpRuntimeModel", () => {
       ).toEqual({ emit: true, skippedSinceEmit: 0 });
     });
 
+    it("drops updates that arrive after the tool call already finished", () => {
+      expect(
+        decideToolCallUpdateEmission({
+          previous: toolCall("same", "completed"),
+          next: toolCall("same", "completed"),
+          lastEmittedDetailLength: 4,
+          skippedSinceEmit: 0,
+        }),
+      ).toEqual({ emit: false, skippedSinceEmit: 0 });
+
+      expect(
+        decideToolCallUpdateEmission({
+          previous: toolCall("same", "failed"),
+          next: toolCall("more output", "inProgress"),
+          lastEmittedDetailLength: 4,
+          skippedSinceEmit: 0,
+        }),
+      ).toEqual({ emit: false, skippedSinceEmit: 0 });
+    });
+
     it("skips updates whose bounded detail did not change", () => {
       const previous = toolCall("frame 1", "inProgress");
       expect(

@@ -642,11 +642,19 @@ export function toolCallProgressLength(state: AcpToolCallState): number {
   return Math.max(state.detail?.length ?? 0, contentChars, rawOutputChars);
 }
 
+export function isTerminalToolCallStatus(status: AcpToolCallState["status"]): boolean {
+  return status === "completed" || status === "failed";
+}
+
 export function decideToolCallUpdateEmission(
   input: AcpToolCallEmitDecisionInput,
 ): AcpToolCallEmitDecision {
   const { previous, next, lastEmittedDetailLength, skippedSinceEmit } = input;
-  if (next.status === "completed" || next.status === "failed") {
+  // A tool call finishes once; anything reported after that is ignored.
+  if (isTerminalToolCallStatus(previous?.status)) {
+    return { emit: false, skippedSinceEmit: 0 };
+  }
+  if (isTerminalToolCallStatus(next.status)) {
     return { emit: true, skippedSinceEmit: 0 };
   }
   if (previous === undefined || previous.title !== next.title || previous.status !== next.status) {

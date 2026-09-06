@@ -16,7 +16,6 @@ import type {
   AcpSessionRuntimeEvent,
   AcpSessionRuntimeOptions,
 } from "./AcpSessionRuntime.ts";
-import { sessionUpdateIsReplay } from "./AcpRuntimeModel.ts";
 
 type Runtime = AcpSessionRuntime["Service"];
 type PendingPrompt = {
@@ -68,6 +67,12 @@ export const makeDevinCloudReconnect = Effect.fn("makeDevinCloudReconnect")(func
   let watching = false;
   let reconnecting = false;
   let cancelOnReconnect = false;
+  let idleAfterCancel: Deferred.Deferred<void> | undefined;
+
+  const eventId = (notification: AcpSchema.SessionNotification) => {
+    const id = notification.update._meta?.["cognition.ai/eventId"];
+    return typeof id === "string" ? id : undefined;
+  };
 
   const settleRecovered = (runtime: Runtime, reason: AcpSchema.StopReason) =>
     Effect.gen(function* () {
@@ -78,9 +83,33 @@ export const makeDevinCloudReconnect = Effect.fn("makeDevinCloudReconnect")(func
       }
     });
 
+  // Cloud answers session/cancel with the cancelled prompt response first and an idle
+  // status update shortly after. A prompt that reaches Cloud between the two is answered
+  // with an immediate end_turn and never runs, so cancellation holds until that status
+  // lands (or a bounded wait elapses, should Cloud ever stop sending it).
+  const cancelSession = (runtime: Runtime) =>
+    Effect.gen(function* () {
+      const idle = yield* Deferred.make<void>();
+      idleAfterCancel = idle;
+      yield* runtime.cancel;
+      yield* Deferred.await(idle).pipe(Effect.timeoutOption("5 seconds"));
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          idleAfterCancel = undefined;
+        }),
+      ),
+    );
+
+  // Cloud's session/load replays the whole event log without marking replays, so a
+  // recovering connection drops every event the previous connections already delivered.
   const makeConnection = Effect.fn("DevinCloudReconnect.connect")(function* (recovering: boolean) {
     const connectionScope = yield* Scope.fork(scope, "sequential");
     const previous = new Set(delivered);
+    const alreadyDelivered = (notification: AcpSchema.SessionNotification) => {
+      const id = eventId(notification);
+      return id !== undefined && previous.has(id);
+    };
     let ready = false;
     let observedStatus = false;
     let latestStopReason: AcpSchema.StopReason | undefined;
@@ -89,33 +118,28 @@ export const makeDevinCloudReconnect = Effect.fn("makeDevinCloudReconnect")(func
         ...(sessionId ? { resumeSessionId: sessionId } : {}),
         ...(recovering
           ? {
-              acceptSessionUpdate: (notification: AcpSchema.SessionNotification) => {
-                if (notification.sessionId !== sessionId) return false;
-                if (!sessionUpdateIsReplay(notification)) return true;
-                const id = notification.update._meta?.["cognition.ai/eventId"];
-                return typeof id === "string" && !previous.has(id);
-              },
+              acceptSessionUpdate: (notification: AcpSchema.SessionNotification) =>
+                notification.sessionId === sessionId && !alreadyDelivered(notification),
             }
           : {}),
         onSessionUpdate: (notification) =>
           Effect.gen(function* () {
             if (notification.sessionId !== sessionId) return;
+            const id = eventId(notification);
+            if (id !== undefined) delivered.add(id);
+            if (alreadyDelivered(notification)) return;
             const meta = notification.update._meta;
-            const id = meta?.["cognition.ai/eventId"];
-            if (typeof id === "string") delivered.add(id);
             if (
-              !recovering ||
-              (sessionUpdateIsReplay(notification) && (typeof id !== "string" || previous.has(id)))
+              meta?.["cognition.ai/statusEnum"] === undefined &&
+              meta?.["cognition.ai/eventType"] !== "devin_exited"
             )
               return;
-            if (
-              meta?.["cognition.ai/statusEnum"] !== undefined ||
-              meta?.["cognition.ai/eventType"] === "devin_exited"
-            ) {
-              observedStatus = true;
-              latestStopReason = stopReason(meta);
-              if (ready && latestStopReason) yield* settleRecovered(runtime, latestStopReason);
-            }
+            const reason = stopReason(meta);
+            if (reason && idleAfterCancel) yield* Deferred.succeed(idleAfterCancel, undefined);
+            if (!recovering) return;
+            observedStatus = true;
+            latestStopReason = reason;
+            if (ready && reason) yield* settleRecovered(runtime, reason);
           }),
       }).pipe(
         Effect.provideService(Scope.Scope, connectionScope),
@@ -135,7 +159,7 @@ export const makeDevinCloudReconnect = Effect.fn("makeDevinCloudReconnect")(func
         ready = true;
         if (!observedStatus) latestStopReason = stopReason(started.sessionSetupResult._meta);
         if (cancelOnReconnect) {
-          yield* runtime.cancel;
+          yield* cancelSession(runtime);
           cancelOnReconnect = false;
         } else if (latestStopReason) yield* settleRecovered(runtime, latestStopReason);
       }
@@ -318,7 +342,7 @@ export const makeDevinCloudReconnect = Effect.fn("makeDevinCloudReconnect")(func
         cancelOnReconnect = true;
         return;
       }
-      yield* (yield* connected).cancel;
+      yield* cancelSession(yield* connected);
     }),
     setMode: (mode) => connected.pipe(Effect.flatMap((runtime) => runtime.setMode(mode))),
     setConfigOption: (id, value) =>
