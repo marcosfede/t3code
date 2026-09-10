@@ -43,9 +43,10 @@ running your T3 Code environment, then enable **Devin Cloud (CLI)** in Settings 
 You can configure another binary that supports `acp --cloud`. This provider is separate from
 **Devin Cloud (Websockets)**, which connects directly.
 
-The model picker starts with **Default** and learns available models when you create or resume
-a Cloud session. Availability checks do not create sessions. Use another provider for automatic
-commit messages and thread titles to avoid creating Cloud sessions for those tasks.
+Normal, Fast, Ultra, Lite, and Fusion are available in the picker before starting a session.
+Creating or resuming a Cloud session refreshes the choices with the modes that session supports.
+Availability checks do not create sessions. Use another provider for automatic commit messages
+and thread titles to avoid creating Cloud sessions for those tasks.
 
 ## Devin Cloud interruptions
 
