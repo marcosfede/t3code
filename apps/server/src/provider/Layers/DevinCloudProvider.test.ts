@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
   DEVIN_CLOUD_DEFAULT_MODEL,
+  DEFAULT_MODEL_BY_PROVIDER,
   DevinCloudSettings,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -14,6 +15,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import { WebSocketServer } from "ws";
+import { normalizeModelSlug } from "@t3tools/shared/model";
 
 import {
   buildInitialDevinCloudProviderSnapshot,
@@ -91,6 +93,26 @@ const makeRelay = (refuse: number) =>
   });
 
 describe("buildInitialDevinCloudProviderSnapshot", () => {
+  it.effect("shows standard Cloud modes before a session exists", () =>
+    Effect.gen(function* () {
+      const snapshot = yield* buildInitialDevinCloudProviderSnapshot(decodeSettings({}));
+      expect(snapshot.models.map((model) => [model.slug, model.name])).toEqual([
+        ["devin-2-5", "Normal"],
+        ["devin-fast-opus", "Fast"],
+        ["devin-ultra", "Ultra"],
+        ["devin_lite", "Lite"],
+        ["devin-auto", "Fusion"],
+      ]);
+      expect(snapshot.models.find((model) => model.isDefault)?.slug).toBe("devin-2-5");
+      expect(snapshot.models[0]?.aliases).toContain(DEVIN_CLOUD_DEFAULT_MODEL);
+      for (const driver of ["devinCloud", "devinCloudCli"]) {
+        const kind = ProviderDriverKind.make(driver);
+        expect(DEFAULT_MODEL_BY_PROVIDER[kind]).toBe("devin-2-5");
+        expect(normalizeModelSlug(DEVIN_CLOUD_DEFAULT_MODEL, kind)).toBe("devin-2-5");
+      }
+    }),
+  );
+
   it.effect("preserves custom model names and capabilities from structured settings", () =>
     Effect.gen(function* () {
       const capabilities = { optionDescriptors: [] };
@@ -135,10 +157,7 @@ describe("makeDevinCloudModelDiscovery", () => {
       } satisfies ServerProviderShape;
       const discovery = yield* makeDevinCloudModelDiscovery(settings.customModels);
       const provider = discovery.decorate(source);
-      expect((yield* provider.getSnapshot).models.map((model) => model.slug)).toEqual([
-        DEVIN_CLOUD_DEFAULT_MODEL,
-        "custom-model",
-      ]);
+      expect((yield* provider.getSnapshot).models).toEqual(initial.models);
       yield* discovery.onSessionSetup({
         configOptions: [
           {
@@ -167,10 +186,7 @@ describe("makeDevinCloudModelDiscovery", () => {
           { id: "devin_version", name: "Model", type: "select", currentValue: "", options: [] },
         ],
       });
-      expect((yield* provider.getSnapshot).models.map((model) => model.slug)).toEqual([
-        DEVIN_CLOUD_DEFAULT_MODEL,
-        "custom-model",
-      ]);
+      expect((yield* provider.getSnapshot).models).toEqual(initial.models);
     }),
   );
 });
@@ -209,7 +225,13 @@ describe("checkDevinCloudProviderStatus", () => {
       expect(snapshot.version).toBe("relay-test");
       expect(relay.methods).toContain("initialize");
       expect(relay.methods.filter((method) => method.startsWith("session/"))).toEqual([]);
-      expect(snapshot.models.map((model) => model.slug)).toEqual([DEVIN_CLOUD_DEFAULT_MODEL]);
+      expect(snapshot.models.map((model) => model.name)).toEqual([
+        "Normal",
+        "Fast",
+        "Ultra",
+        "Lite",
+        "Fusion",
+      ]);
     }).pipe(Effect.scoped),
   );
 
