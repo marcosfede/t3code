@@ -20,7 +20,6 @@ import * as PlatformError from "effect/PlatformError";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import {
   ApprovalRequestId,
-  DEVIN_CLOUD_DEFAULT_MODEL,
   DevinCloudCliSettings,
   ProviderDriverKind,
   ThreadId,
@@ -786,7 +785,13 @@ describe("Devin Cloud CLI health", () => {
       expect(snapshot.status).toBe("ready");
       expect(snapshot.auth.status).toBe("authenticated");
       expect(snapshot.version).toBe("1.2.3");
-      expect(snapshot.models.map((model) => model.slug)).toEqual([DEVIN_CLOUD_DEFAULT_MODEL]);
+      expect(snapshot.models.map((model) => model.name)).toEqual([
+        "Normal",
+        "Fast",
+        "Ultra",
+        "Lite",
+        "Fusion",
+      ]);
       expect(server.requests.map((request) => request.method)).toContain("initialize");
       expect(server.requests.filter((request) => request.method?.startsWith("session/"))).toEqual(
         [],
