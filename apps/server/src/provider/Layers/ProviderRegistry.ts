@@ -106,7 +106,8 @@ const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean =>
   const isOpenCode = provider.driver === ProviderDriverKind.make("opencode");
   const isDevin =
     provider.driver === ProviderDriverKind.make("devin") ||
-    provider.driver === ProviderDriverKind.make("devinCloud");
+    provider.driver === ProviderDriverKind.make("devinCloud") ||
+    provider.driver === ProviderDriverKind.make("devinCloudCli");
   if (!isAntigravity && !isCodex && !isOpenCode && !isDevin) {
     return true;
   }
