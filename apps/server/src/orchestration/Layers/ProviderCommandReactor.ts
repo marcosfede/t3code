@@ -119,6 +119,7 @@ const turnStartKeyForEvent = (event: ProviderIntentEvent): string =>
 
 const HANDLED_TURN_START_KEY_MAX = 10_000;
 const HANDLED_TURN_START_KEY_TTL = Duration.minutes(30);
+const INTERRUPT_SETTLE_TIMEOUT = Duration.seconds(15);
 const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 
 function providerErrorLabel(value: string | undefined): string {
@@ -264,6 +265,18 @@ const make = Effect.gen(function* () {
     }
   >();
   const stoppingThreadIds = new Set<ThreadId>();
+  // Providers acknowledge an interrupt before the turn actually ends. A turn
+  // start sent in that window is steered into the dying turn and lost with
+  // it, so it waits here until the session leaves the running state.
+  const settlingInterrupts = new Map<ThreadId, Deferred.Deferred<void>>();
+  const settleInterrupt = (threadId: ThreadId) => {
+    const pending = settlingInterrupts.get(threadId);
+    if (!pending) {
+      return Effect.void;
+    }
+    settlingInterrupts.delete(threadId);
+    return Deferred.succeed(pending, undefined).pipe(Effect.asVoid);
+  };
 
   const appendProviderFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -1475,33 +1488,53 @@ const make = Effect.gen(function* () {
       turnsAfterCompaction.set(event.payload.threadId, queued);
       return;
     }
-    const sendTurnRequest = yield* buildSendTurnRequestForThread({
-      threadId: event.payload.threadId,
-      messageText: projectComposerContextForProvider({
-        text: message.text,
-        records: message.context?.records ?? [],
-      }),
-      ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
-      ...(event.payload.modelSelection !== undefined
-        ? { modelSelection: event.payload.modelSelection }
-        : {}),
-      interactionMode: event.payload.interactionMode,
-      createdAt: event.payload.createdAt,
-    }).pipe(
-      Effect.map(Option.some),
-      Effect.catchCause((cause) => handleTurnStartFailure(cause).pipe(Effect.as(Option.none()))),
-    );
+    const startTurn = Effect.gen(function* () {
+      const sendTurnRequest = yield* buildSendTurnRequestForThread({
+        threadId: event.payload.threadId,
+        messageText: projectComposerContextForProvider({
+          text: message.text,
+          records: message.context?.records ?? [],
+        }),
+        ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
+        ...(event.payload.modelSelection !== undefined
+          ? { modelSelection: event.payload.modelSelection }
+          : {}),
+        interactionMode: event.payload.interactionMode,
+        createdAt: event.payload.createdAt,
+      }).pipe(
+        Effect.map(Option.some),
+        Effect.catchCause((cause) => handleTurnStartFailure(cause).pipe(Effect.as(Option.none()))),
+      );
 
-    if (Option.isNone(sendTurnRequest)) {
-      return;
-    }
+      if (Option.isNone(sendTurnRequest)) {
+        return;
+      }
 
-    const send = providerService
-      .sendTurn(sendTurnRequest.value)
-      .pipe(Effect.asVoid, Effect.catchCause(recoverTurnStartFailure));
+      yield* providerService
+        .sendTurn(sendTurnRequest.value)
+        .pipe(Effect.asVoid, Effect.catchCause(recoverTurnStartFailure));
+    });
+
+    const settlingInterrupt = settlingInterrupts.get(event.payload.threadId);
+    const waitForInterrupt = settlingInterrupt === undefined
+      ? Effect.void
+      : Deferred.await(settlingInterrupt).pipe(
+          Effect.timeoutOption(INTERRUPT_SETTLE_TIMEOUT),
+          Effect.flatMap(
+            Option.match({
+              onNone: () =>
+                Effect.logWarning("provider command reactor timed out waiting for interrupt", {
+                  threadId: event.payload.threadId,
+                }).pipe(Effect.andThen(settleInterrupt(event.payload.threadId))),
+              onSome: () => Effect.void,
+            }),
+          ),
+        );
     // The forked send settles `sent` from here on, so drop the entry the post-processing hook uses.
     if (resumed && event.commandId !== null) resumedTurnStarts.delete(event.commandId);
-    yield* send.pipe(
+    // Off the shared worker so a slow provider only delays this thread.
+    yield* waitForInterrupt.pipe(
+      Effect.andThen(startTurn),
       Effect.ensuring(resumed ? Deferred.succeed(resumed.sent, undefined) : Effect.void),
       Effect.forkScoped,
     );
@@ -1600,10 +1633,18 @@ const make = Effect.gen(function* () {
       });
     };
 
+    if (session.status === "running" && !settlingInterrupts.has(event.payload.threadId)) {
+      settlingInterrupts.set(event.payload.threadId, yield* Deferred.make<void>());
+    }
     // Orchestration turn ids are not provider turn ids, so interrupt by session.
     yield* providerService
       .interruptTurn({ threadId: event.payload.threadId })
       .pipe(Effect.catchCause(recoverInterruptFailure));
+    // The session may have left running before the deferred existed to see it.
+    const settledThread = yield* resolveThreadShell(event.payload.threadId);
+    if (settledThread?.session?.status !== "running") {
+      yield* settleInterrupt(event.payload.threadId);
+    }
   });
 
   const processApprovalResponseRequested = Effect.fn("processApprovalResponseRequested")(function* (
@@ -1878,6 +1919,9 @@ const make = Effect.gen(function* () {
       }),
     );
     const processEvent = Effect.fn("processEvent")(function* (event: OrchestrationEvent) {
+      if (event.type === "thread.session-set" && event.payload.session.status !== "running") {
+        return yield* settleInterrupt(event.payload.threadId);
+      }
       if (
         (event.type === "thread.meta-updated" &&
           (event.payload.regenerateTitle === true ||
