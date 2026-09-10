@@ -1,0 +1,1839 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodePath from "node:path";
+import * as NodeOS from "node:os";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeURL from "node:url";
+
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { assert, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
+import * as EffectAcpErrors from "effect-acp/errors";
+import type * as EffectAcpSchema from "effect-acp/schema";
+
+import {
+  ApprovalRequestId,
+  DevinSettings,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ThreadId,
+  TurnId,
+  type ProviderRuntimeEvent,
+} from "@t3tools/contracts";
+
+import { ServerConfig } from "../../config.ts";
+import type * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
+import { makeDevinAcpRuntime } from "../acp/DevinAcpSupport.ts";
+import {
+  devinPromptSettlementBelongsToContext,
+  isAcpConnectionLostError,
+  makeDevinAdapter,
+} from "./DevinAdapter.ts";
+const decodeDevinSettings = Schema.decodeSync(DevinSettings);
+
+const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
+const mockAgentPath = NodePath.join(__dirname, "../../../scripts/acp-mock-agent.ts");
+const mockAgentCommand = process.execPath;
+
+async function makeMockDevinWrapper(extraEnv?: Record<string, string>) {
+  const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-mock-"));
+  const wrapperPath = NodePath.join(dir, "fake-devin.sh");
+  const envExports = Object.entries({ T3_ACP_COMPLETE_HANGING_PROMPT_ON_CANCEL: "1", ...extraEnv })
+    .map(([key, value]) => `export ${key}=${JSON.stringify(value)}`)
+    .join("\n");
+  const script = `#!/bin/sh
+${envExports}
+exec ${JSON.stringify(mockAgentCommand)} ${JSON.stringify(mockAgentPath)} "$@"
+`;
+  await NodeFSP.writeFile(wrapperPath, script, "utf8");
+  await NodeFSP.chmod(wrapperPath, 0o755);
+  return wrapperPath;
+}
+
+function waitForFileContent(
+  filePath: string,
+  attempts = 40,
+  expectedContent?: string,
+): Effect.Effect<string> {
+  const readAttempt = (remainingAttempts: number): Effect.Effect<string> =>
+    Effect.gen(function* () {
+      if (remainingAttempts <= 0) {
+        return yield* Effect.die(new Error(`Timed out waiting for file content at ${filePath}`));
+      }
+      const raw = yield* Effect.tryPromise(() => NodeFSP.readFile(filePath, "utf8")).pipe(
+        Effect.orElseSucceed(() => ""),
+      );
+      if (
+        raw.trim().length > 0 &&
+        (expectedContent === undefined || raw.includes(expectedContent))
+      ) {
+        return raw;
+      }
+      yield* Effect.sleep("25 millis");
+      return yield* readAttempt(remainingAttempts - 1);
+    });
+  return readAttempt(attempts);
+}
+
+async function readJsonLines(filePath: string) {
+  const raw = await NodeFSP.readFile(filePath, "utf8");
+  return raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+const devinAdapterTestLayer = ServerConfig.layerTest(process.cwd(), {
+  prefix: "t3code-devin-adapter-test-",
+}).pipe(Layer.provideMerge(NodeServices.layer));
+
+const makeTestAdapter = (binaryPath: string, options?: Parameters<typeof makeDevinAdapter>[1]) =>
+  makeDevinAdapter(decodeDevinSettings({ binaryPath }), options).pipe(Effect.orDie);
+
+it("requires a settlement to match the live Devin turn", () => {
+  const staleTurnId = TurnId.make("stale-turn");
+  const replacementTurnId = TurnId.make("replacement-turn");
+
+  assert.isFalse(
+    devinPromptSettlementBelongsToContext({
+      liveAcpSessionId: "session-1",
+      expectedAcpSessionId: "session-1",
+      liveActiveTurnId: replacementTurnId,
+      liveSessionActiveTurnId: replacementTurnId,
+      turnId: staleTurnId,
+    }),
+  );
+  assert.isFalse(
+    devinPromptSettlementBelongsToContext({
+      liveAcpSessionId: "replacement-session",
+      expectedAcpSessionId: "stale-session",
+      liveActiveTurnId: staleTurnId,
+      liveSessionActiveTurnId: staleTurnId,
+      turnId: staleTurnId,
+    }),
+  );
+  assert.isTrue(
+    devinPromptSettlementBelongsToContext({
+      liveAcpSessionId: "session-1",
+      expectedAcpSessionId: "session-1",
+      liveActiveTurnId: staleTurnId,
+      liveSessionActiveTurnId: staleTurnId,
+      turnId: staleTurnId,
+    }),
+  );
+});
+
+it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
+  it.effect("starts a session and maps mock ACP prompt flow to runtime events", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-mock-thread");
+      const wrapperPath = yield* Effect.promise(() => makeMockDevinWrapper());
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const turnCompleted = yield* Deferred.make<void>();
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }).pipe(
+          Effect.andThen(
+            event.type === "turn.completed"
+              ? Deferred.succeed(turnCompleted, undefined)
+              : Effect.void,
+          ),
+        ),
+      ).pipe(Effect.forkChild);
+
+      const session = yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("devin"), model: "composer-2" },
+      });
+
+      assert.equal(session.provider, "devin");
+      assert.equal(session.model, "composer-2");
+      assert.deepStrictEqual(session.resumeCursor, {
+        schemaVersion: 1,
+        sessionId: "mock-session-1",
+      });
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "hello devin",
+        attachments: [],
+      });
+
+      yield* Deferred.await(turnCompleted);
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      const types = runtimeEvents.map((e) => e.type);
+
+      assert.includeMembers(types, [
+        "session.started",
+        "session.state.changed",
+        "thread.started",
+        "turn.started",
+        "item.started",
+        "content.delta",
+        "turn.completed",
+      ] as const);
+
+      const delta = runtimeEvents.find((e) => e.type === "content.delta");
+      assert.isDefined(delta);
+      if (delta?.type === "content.delta") {
+        assert.equal(delta.payload.delta, "hello from mock");
+      }
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  for (const ending of ["complete", "interrupt", "stop"] as const) {
+    it.effect(`closes the thinking preview on ${ending} without subsequent assistant text`, () =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make(`devin-thinking-${ending}`);
+        const wrapperPath = yield* Effect.promise(() =>
+          makeMockDevinWrapper(
+            ending === "complete" ? {} : { T3_ACP_FINISH_CANCELLED_TOOL_IN_NEXT_PROMPT: "1" },
+          ),
+        );
+        const adapter = yield* makeTestAdapter(wrapperPath, {
+          makeAcpRuntime: (input) =>
+            makeDevinAcpRuntime({ ...input, devinSettings: { binaryPath: wrapperPath } }).pipe(
+              Effect.map((runtime) => ({
+                ...runtime,
+                getEvents: () =>
+                  runtime.getEvents().pipe(
+                    Stream.filter((event) => event._tag !== "AssistantItemCompleted"),
+                    Stream.map((event): AcpSessionRuntime.AcpSessionRuntimeEvent =>
+                      event._tag === "ContentDelta" || event._tag === "ToolCallUpdated"
+                        ? { _tag: "ThoughtDelta", text: "Checking layout.", rawPayload: {} }
+                        : event,
+                    ),
+                  ),
+              })),
+            ),
+        });
+        const events: ProviderRuntimeEvent[] = [];
+        const thinkingStarted = yield* Deferred.make<TurnId>();
+        const settled = yield* Deferred.make<void>();
+        yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.gen(function* () {
+            events.push(event);
+            if (
+              event.type === "item.updated" &&
+              event.payload.title === "Thinking" &&
+              event.turnId
+            ) {
+              yield* Deferred.succeed(thinkingStarted, event.turnId);
+            }
+            if (event.type === (ending === "stop" ? "session.exited" : "turn.completed")) {
+              yield* Deferred.succeed(settled, undefined);
+            }
+          }),
+        ).pipe(Effect.forkChild);
+        yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+        const send = yield* adapter
+          .sendTurn({ threadId, input: "Think", attachments: [] })
+          .pipe(Effect.forkChild);
+        const turnId = yield* Deferred.await(thinkingStarted);
+        if (ending === "interrupt") yield* adapter.interruptTurn(threadId, turnId);
+        if (ending === "stop") yield* adapter.stopSession(threadId);
+        yield* Deferred.await(settled);
+        yield* Fiber.await(send);
+        const completed = events
+          .filter((event) => event.type === "item.completed")
+          .filter((event) => event.payload.title === "Thinking");
+        assert.equal(completed.length, 1);
+        assert.equal(completed[0]?.turnId, turnId);
+        assert.isBelow(
+          events.indexOf(completed[0]!),
+          events.findIndex(
+            (event) => event.type === (ending === "stop" ? "session.exited" : "turn.completed"),
+          ),
+        );
+        if (ending !== "stop") yield* adapter.stopSession(threadId);
+      }),
+    );
+  }
+
+  for (const provider of ["devin", "devinCloud"] as const) {
+    it.effect(`publishes ${provider} thinking previews and retains Cloud tool metadata`, () =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make(`devin-activity-${provider}`);
+        const wrapperPath = yield* Effect.promise(() => makeMockDevinWrapper());
+        const adapter = yield* makeTestAdapter(wrapperPath, {
+          provider: ProviderDriverKind.make(provider),
+          makeAcpRuntime: (input) =>
+            makeDevinAcpRuntime({ ...input, devinSettings: { binaryPath: wrapperPath } }).pipe(
+              Effect.map((runtime) => ({
+                ...runtime,
+                getEvents: () =>
+                  runtime.getEvents().pipe(
+                    Stream.flatMap((event) =>
+                      Stream.fromIterable<AcpSessionRuntime.AcpSessionRuntimeEvent>(
+                        event._tag === "ContentDelta"
+                          ? [
+                              { _tag: "ThoughtDelta", text: "Checking ", rawPayload: {} },
+                              { _tag: "ThoughtDelta", text: "the layout.", rawPayload: {} },
+                              {
+                                _tag: "ToolCallUpdated",
+                                toolCall: {
+                                  toolCallId: "cloud-command",
+                                  kind: "execute",
+                                  title: "Ran command",
+                                  status: "inProgress",
+                                  data: { kind: "execute" },
+                                },
+                                rawPayload: {
+                                  update: {
+                                    sessionUpdate: "tool_call",
+                                    _meta: { "cognition.ai/command": "printf 'layout'" },
+                                  },
+                                },
+                              },
+                              {
+                                _tag: "ToolCallUpdated",
+                                toolCall: {
+                                  toolCallId: "cloud-command",
+                                  kind: "execute",
+                                  title: "Ran command",
+                                  status: "completed",
+                                  data: { kind: "execute", rawOutput: "layout" },
+                                },
+                                rawPayload: { update: { sessionUpdate: "tool_call_update" } },
+                              },
+                              {
+                                _tag: "ToolCallUpdated",
+                                toolCall: {
+                                  toolCallId: "cloud-edit",
+                                  kind: "edit",
+                                  title: "Changed files",
+                                  status: "completed",
+                                  data: { kind: "edit" },
+                                },
+                                rawPayload: {
+                                  update: {
+                                    _meta: {
+                                      "cognition.ai/fileUpdates": [
+                                        { file_path: "/workspace/layout.html" },
+                                      ],
+                                    },
+                                  },
+                                },
+                              },
+                              event,
+                              { _tag: "ThoughtDelta", text: "Final check.", rawPayload: {} },
+                            ]
+                          : [event],
+                      ),
+                    ),
+                  ),
+              })),
+            ),
+        });
+        const events: ProviderRuntimeEvent[] = [];
+        const completed = yield* Deferred.make<void>();
+        yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.gen(function* () {
+            events.push(event);
+            if (event.type === "turn.completed") yield* Deferred.succeed(completed, undefined);
+          }),
+        ).pipe(Effect.forkChild);
+        yield* adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make(provider),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({ threadId, input: "Check layout", attachments: [] });
+        yield* Deferred.await(completed);
+        const items = events.filter(
+          (event) => event.type === "item.updated" || event.type === "item.completed",
+        );
+        const thoughts = items.filter((event) => event.payload.title === "Thinking");
+        assert.equal(thoughts.length, 4);
+        assert.equal(thoughts[0]?.type, "item.updated");
+        assert.equal(thoughts[1]?.type, "item.completed");
+        assert.equal(thoughts[0]?.itemId, thoughts[1]?.itemId);
+        assert.notEqual(thoughts[0]?.itemId, thoughts[2]?.itemId);
+        assert.deepStrictEqual(thoughts[1]?.payload.data, {
+          kind: "think",
+          rawOutput: { content: "Checking the layout." },
+        });
+        const command = items.find(
+          (event) => event.type === "item.completed" && event.itemId === "cloud-command",
+        );
+        assert.equal(command?.payload.detail, "printf 'layout'");
+        assert.deepInclude(command?.payload.data, {
+          command: "printf 'layout'",
+          rawOutput: "layout",
+        });
+        const edit = items.find(
+          (event) => event.type === "item.completed" && event.itemId === "cloud-edit",
+        );
+        assert.equal(edit?.payload.detail, "/workspace/layout.html");
+        assert.deepInclude(edit?.payload.data, { changes: [{ path: "/workspace/layout.html" }] });
+        assert.equal(
+          events.some((event) => event.type === "task.progress"),
+          false,
+        );
+        assert.equal(
+          events
+            .filter((event) => event.type === "content.delta")
+            .map((event) => event.payload.delta)
+            .join(""),
+          "hello from mock",
+        );
+        assert.isBelow(
+          events.indexOf(thoughts[3]!),
+          events.findIndex((event) => event.type === "turn.completed"),
+        );
+        yield* adapter.stopSession(threadId);
+      }),
+    );
+
+    it.effect(`keeps ${provider} response segments together across tool calls`, () =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make(`devin-grouped-response-${provider}`);
+        const wrapperPath = yield* Effect.promise(() =>
+          makeMockDevinWrapper({ T3_ACP_EMIT_INTERLEAVED_ASSISTANT_TOOL_CALLS: "1" }),
+        );
+        const adapter = yield* makeTestAdapter(wrapperPath, {
+          provider: ProviderDriverKind.make(provider),
+          makeAcpRuntime: (input) =>
+            makeDevinAcpRuntime({ ...input, devinSettings: { binaryPath: wrapperPath } }).pipe(
+              Effect.map((runtime) => ({
+                ...runtime,
+                getEvents: () =>
+                  runtime.getEvents().pipe(
+                    Stream.flatMap((event) =>
+                      Stream.fromIterable<AcpSessionRuntime.AcpSessionRuntimeEvent>(
+                        event._tag === "ContentDelta"
+                          ? [
+                              { ...event, text: event.text.slice(0, 3) },
+                              { ...event, text: event.text.slice(3) },
+                            ]
+                          : [event],
+                      ),
+                    ),
+                  ),
+              })),
+            ),
+        });
+        const events: ProviderRuntimeEvent[] = [];
+        let turnCompleted = yield* Deferred.make<void>();
+        yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.gen(function* () {
+            events.push(event);
+            if (event.type === "turn.completed") {
+              yield* Deferred.succeed(turnCompleted, undefined);
+            }
+          }),
+        ).pipe(Effect.forkChild);
+        yield* adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make(provider),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+
+        const responseItemIds: string[] = [];
+        for (const input of ["Show the proposal", "Revise it"]) {
+          turnCompleted = yield* Deferred.make<void>();
+          const turn = yield* adapter.sendTurn({ threadId, input, attachments: [] });
+          yield* Deferred.await(turnCompleted);
+          const turnEvents = events.filter((event) => event.turnId === turn.turnId);
+          const deltas = turnEvents.filter((event) => event.type === "content.delta");
+          const itemId = deltas[0]?.itemId;
+          assert.isDefined(itemId);
+          responseItemIds.push(String(itemId));
+          assert.equal(
+            deltas.map((event) => event.payload.delta).join(""),
+            "before tool\n\nafter tool",
+          );
+          assert.isTrue(deltas.every((event) => event.itemId === itemId));
+          const assistantItems = turnEvents.filter(
+            (event) =>
+              (event.type === "item.started" || event.type === "item.completed") &&
+              event.payload.itemType === "assistant_message",
+          );
+          assert.deepStrictEqual(
+            assistantItems.map((event) => event.itemId),
+            [itemId, itemId, itemId, itemId],
+          );
+        }
+        assert.isTrue(
+          events.some(
+            (event) =>
+              event.type === "item.completed" &&
+              event.payload.itemType === "command_execution" &&
+              !responseItemIds.includes(String(event.itemId)),
+          ),
+        );
+        assert.notEqual(responseItemIds[0], responseItemIds[1]);
+        yield* adapter.stopSession(threadId);
+      }),
+    );
+  }
+
+  it.effect("keeps delivering notifications after the fiber that started the session ends", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-start-fiber-ended");
+      const wrapperPath = yield* Effect.promise(() => makeMockDevinWrapper());
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const contentDelta = yield* Deferred.make<void>();
+      const turnCompleted = yield* Deferred.make<void>();
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.type === "content.delta"
+          ? Deferred.succeed(contentDelta, undefined)
+          : event.type === "turn.completed"
+            ? Deferred.succeed(turnCompleted, undefined)
+            : Effect.void,
+      ).pipe(Effect.forkChild);
+
+      // A restart continuation or a recovering sendTurn starts the session
+      // from a fiber that finishes long before the thread does.
+      yield* adapter
+        .startSession({
+          threadId,
+          provider: ProviderDriverKind.make("devin"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.forkChild, Effect.flatMap(Fiber.join));
+
+      yield* adapter.sendTurn({ threadId, input: "hello devin", attachments: [] });
+
+      yield* Deferred.await(contentDelta);
+      yield* Deferred.await(turnCompleted);
+      yield* Fiber.interrupt(eventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("closes the ACP child process when a session stops", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-stop-session-close");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-adapter-exit-log-")),
+      );
+      const exitLogPath = NodePath.join(tempDir, "exit.log");
+
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({
+          T3_ACP_EXIT_LOG_PATH: exitLogPath,
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("devin"), model: "default" },
+      });
+
+      yield* adapter.stopSession(threadId);
+
+      const exitLog = yield* waitForFileContent(exitLogPath);
+      assert.include(exitLog, "SIGTERM");
+    }),
+  );
+
+  it.effect("evicts the session when the transport dies while the thread is idle", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-idle-transport-death");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({
+          T3_ACP_EXIT_AFTER_SESSION_MS: "400",
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const sessionExited =
+        yield* Deferred.make<Extract<ProviderRuntimeEvent, { type: "session.exited" }>>();
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.type === "session.exited"
+          ? Deferred.succeed(sessionExited, event).pipe(Effect.ignore)
+          : Effect.void,
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("devin"), model: "default" },
+      });
+
+      const exited = yield* Deferred.await(sessionExited);
+      assert.equal(exited.payload.exitKind, "error");
+      if (exited.payload.exitKind === "error") {
+        assert.isTrue(exited.payload.recoverable);
+      }
+
+      const remaining = yield* adapter.listSessions();
+      assert.isUndefined(remaining.find((session) => session.threadId === threadId));
+
+      yield* Fiber.interrupt(eventsFiber);
+    }),
+  );
+
+  it.effect("reports a Devin session running only while the prompt is in flight", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-session-ready-after-prompt");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({
+          T3_ACP_EMIT_TOOL_CALLS: "1",
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const requestOpened =
+        yield* Deferred.make<Extract<ProviderRuntimeEvent, { type: "request.opened" }>>();
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.type === "request.opened"
+          ? Deferred.succeed(requestOpened, event).pipe(Effect.ignore)
+          : Effect.void,
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "approval-required",
+        modelSelection: { instanceId: ProviderInstanceId.make("devin"), model: "default" },
+      });
+
+      const sendTurnFiber = yield* adapter
+        .sendTurn({ threadId, input: "check lifecycle", attachments: [] })
+        .pipe(Effect.forkChild);
+      const requestOpenedEvent = yield* Deferred.await(requestOpened);
+
+      const runningSessions = yield* adapter.listSessions();
+      const runningSession = runningSessions.find((session) => session.threadId === threadId);
+      assert.equal(runningSession?.status, "running");
+      assert.isDefined(runningSession?.activeTurnId);
+
+      yield* adapter.respondToRequest(
+        threadId,
+        ApprovalRequestId.make(String(requestOpenedEvent.requestId)),
+        "accept",
+      );
+      yield* Fiber.join(sendTurnFiber);
+
+      const readySessions = yield* adapter.listSessions();
+      const readySession = readySessions.find((session) => session.threadId === threadId);
+      assert.equal(readySession?.status, "ready");
+      assert.isUndefined(readySession?.activeTurnId);
+
+      yield* Fiber.interrupt(eventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("keeps the turn running when the sendTurn caller is interrupted mid-prompt", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-send-turn-caller-interrupted");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({ T3_ACP_EMIT_CONTENT_THEN_HANG: "1" }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const contentDelta = yield* Deferred.make<void>();
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.type === "content.delta" ? Deferred.succeed(contentDelta, undefined) : Effect.void,
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const sendTurnFiber = yield* adapter
+        .sendTurn({ threadId, input: "keep streaming", attachments: [] })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(contentDelta);
+
+      yield* Fiber.interrupt(sendTurnFiber);
+
+      const session = (yield* adapter.listSessions()).find(
+        (session) => session.threadId === threadId,
+      );
+      assert.equal(session?.status, "running");
+      assert.isDefined(session?.activeTurnId);
+
+      yield* Fiber.interrupt(eventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("restores ready without completing an unstarted turn when preparation fails", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-preparation-failure-while-connecting");
+      const wrapperPath = yield* Effect.promise(() => makeMockDevinWrapper());
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("devin"), model: "default" },
+      });
+
+      const error = yield* Effect.flip(
+        adapter.sendTurn({
+          threadId,
+          input: "prepare invalid attachment",
+          attachments: [
+            {
+              type: "image",
+              id: "missing-image",
+              name: "missing.png",
+              mimeType: "image/png",
+              sizeBytes: 1,
+            },
+          ],
+        }),
+      );
+      for (let yieldAttempt = 0; yieldAttempt < 4; yieldAttempt += 1) {
+        yield* Effect.yieldNow;
+      }
+
+      const turnCompletedEvent = runtimeEvents.find(
+        (event): event is Extract<ProviderRuntimeEvent, { type: "turn.completed" }> =>
+          event.type === "turn.completed",
+      );
+      const readySessions = yield* adapter.listSessions();
+      const readySession = readySessions.find((session) => session.threadId === threadId);
+
+      assert.equal(error._tag, "ProviderAdapterRequestError");
+      assert.isUndefined(turnCompletedEvent);
+      assert.equal(readySession?.status, "ready");
+      assert.isUndefined(readySession?.activeTurnId);
+
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("lets Stop unblock a fully silent Devin prompt and accept a follow-up turn", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-stop-after-full-silence");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({
+          T3_ACP_HANG_FIRST_PROMPT_FOREVER: "1",
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("devin"), model: "default" },
+      });
+
+      yield* Effect.gen(function* () {
+        yield* Effect.sleep("500 millis");
+        yield* adapter.interruptTurn(threadId);
+      }).pipe(Effect.forkChild({ startImmediately: true }));
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "hang forever",
+        attachments: [],
+      });
+      for (let yieldAttempt = 0; yieldAttempt < 8; yieldAttempt += 1) {
+        yield* Effect.yieldNow;
+      }
+
+      const cancelledEvents = runtimeEvents.filter(
+        (event): event is Extract<ProviderRuntimeEvent, { type: "turn.completed" }> =>
+          event.type === "turn.completed" && String(event.threadId) === String(threadId),
+      );
+      const readySessions = yield* adapter.listSessions();
+      const readySession = readySessions.find((session) => session.threadId === threadId);
+
+      assert.lengthOf(cancelledEvents, 1);
+      assert.equal(cancelledEvents[0]?.payload.state, "cancelled");
+      assert.equal(readySession?.status, "ready");
+      assert.isUndefined(readySession?.activeTurnId);
+
+      const followUpEventsBefore = runtimeEvents.length;
+      yield* adapter.sendTurn({
+        threadId,
+        input: "continue after stop",
+        attachments: [],
+      });
+      for (let yieldAttempt = 0; yieldAttempt < 8; yieldAttempt += 1) {
+        yield* Effect.yieldNow;
+      }
+
+      const followUpCompletedEvents = runtimeEvents
+        .slice(followUpEventsBefore)
+        .filter(
+          (event): event is Extract<ProviderRuntimeEvent, { type: "turn.completed" }> =>
+            event.type === "turn.completed" && String(event.threadId) === String(threadId),
+        );
+      assert.lengthOf(followUpCompletedEvents, 1);
+      assert.equal(followUpCompletedEvents[0]?.payload.state, "completed");
+
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      yield* adapter.stopSession(threadId);
+    }).pipe(TestClock.withLive),
+  );
+
+  it.effect("does not let a cancelled prompt settlement consume the follow-up prompt slot", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-cancelled-settlement-before-follow-up");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-cancel-race-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({
+          T3_ACP_HANG_FIRST_PROMPT_FOREVER: "1",
+          T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const firstTurnStarted = yield* Deferred.make<TurnId>();
+      const twoTurnsCompleted = yield* Deferred.make<void>();
+      const completedCountRef = yield* Ref.make(0);
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          runtimeEvents.push(event);
+          if (String(event.threadId) !== String(threadId)) {
+            return;
+          }
+          if (event.type === "turn.started" && event.turnId !== undefined) {
+            yield* Deferred.succeed(firstTurnStarted, event.turnId).pipe(Effect.ignore);
+            return;
+          }
+          if (event.type !== "turn.completed") {
+            return;
+          }
+          const completedCount = yield* Ref.updateAndGet(completedCountRef, (count) => count + 1);
+          if (completedCount === 2) {
+            yield* Deferred.succeed(twoTurnsCompleted, undefined);
+          }
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      const firstSendTurnFiber = yield* adapter
+        .sendTurn({ threadId, input: "cancel this prompt", attachments: [] })
+        .pipe(Effect.forkChild);
+      const firstTurnId = yield* Deferred.await(firstTurnStarted).pipe(Effect.timeout("2 seconds"));
+      yield* waitForFileContent(requestLogPath, 80, '"method":"session/prompt"');
+
+      yield* adapter.interruptTurn(threadId, firstTurnId).pipe(Effect.timeout("2 seconds"));
+      const followUp = yield* adapter
+        .sendTurn({ threadId, input: "complete the follow-up", attachments: [] })
+        .pipe(Effect.timeout("2 seconds"));
+      yield* Fiber.join(firstSendTurnFiber).pipe(Effect.timeout("2 seconds"));
+      yield* Deferred.await(twoTurnsCompleted).pipe(Effect.timeout("2 seconds"));
+
+      const turnCompletedEvents = runtimeEvents.filter(
+        (event): event is Extract<ProviderRuntimeEvent, { type: "turn.completed" }> =>
+          event.type === "turn.completed" && String(event.threadId) === String(threadId),
+      );
+      const readySessions = yield* adapter.listSessions();
+      const readySession = readySessions.find((session) => session.threadId === threadId);
+
+      assert.notEqual(String(followUp.turnId), String(firstTurnId));
+      assert.deepEqual(
+        turnCompletedEvents.map((event) => [String(event.turnId), event.payload.state]),
+        [
+          [String(firstTurnId), "cancelled"],
+          [String(followUp.turnId), "completed"],
+        ],
+      );
+      assert.equal(readySession?.status, "ready");
+      assert.isUndefined(readySession?.activeTurnId);
+
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      yield* adapter.stopSession(threadId);
+    }).pipe(TestClock.withLive),
+  );
+
+  for (const action of ["steer", "interrupt"] as const) {
+    it.effect(`waits for Devin cancellation before a replacement message after ${action}`, () =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make(`devin-native-cancel-${action}`);
+        const wrapperPath = yield* Effect.promise(() =>
+          makeMockDevinWrapper({ T3_ACP_COMPLETE_FIRST_PROMPT_ON_CANCEL: "1" }),
+        );
+        const runtimeReady = yield* Deferred.make<AcpSessionRuntime.AcpSessionRuntime["Service"]>();
+        const toolStarted = yield* Deferred.make<void>();
+        const cancelReceived = yield* Deferred.make<void>();
+        const replacementCompleted = yield* Deferred.make<void>();
+        const promptStatuses: string[] = [];
+        const completions: ProviderRuntimeEvent[] = [];
+        const adapter = yield* makeTestAdapter(wrapperPath, {
+          makeAcpRuntime: (input) =>
+            makeDevinAcpRuntime({
+              ...input,
+              devinSettings: { binaryPath: wrapperPath },
+              requestLogger: (event) =>
+                Effect.sync(() => {
+                  if (event.method === "session/prompt") promptStatuses.push(event.status);
+                }),
+              onSessionUpdate: (notification) =>
+                Effect.gen(function* () {
+                  yield* input.onSessionUpdate?.(notification) ?? Effect.void;
+                  const update = notification.update;
+                  if (update.sessionUpdate === "tool_call") {
+                    yield* Deferred.succeed(toolStarted, undefined);
+                  }
+                  if (
+                    update.sessionUpdate === "agent_thought_chunk" &&
+                    update.content.type === "text" &&
+                    update.content.text === "native-cancel-received"
+                  ) {
+                    yield* Deferred.succeed(cancelReceived, undefined);
+                  }
+                }),
+            }).pipe(Effect.tap((runtime) => Deferred.succeed(runtimeReady, runtime))),
+        });
+        yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.gen(function* () {
+            if (event.type !== "turn.completed") return;
+            completions.push(event);
+            if (event.payload.state === "completed") {
+              yield* Deferred.succeed(replacementCompleted, undefined);
+            }
+          }),
+        ).pipe(Effect.forkChild);
+        yield* adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("devin"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+        const runtime = yield* Deferred.await(runtimeReady);
+        const first = yield* adapter
+          .sendTurn({ threadId, input: "original message", attachments: [] })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(toolStarted);
+        const replacement = yield* Effect.gen(function* () {
+          if (action === "interrupt") yield* adapter.interruptTurn(threadId);
+          return yield* adapter.sendTurn({
+            threadId,
+            input: "replacement message",
+            attachments: [],
+          });
+        }).pipe(Effect.forkChild);
+        yield* Deferred.await(cancelReceived);
+        yield* runtime.request("_test/finish-cancel", {});
+        const originalTurn = yield* Fiber.join(first);
+        const replacementTurn = yield* Fiber.join(replacement);
+        yield* Deferred.await(replacementCompleted);
+        assert.deepEqual(promptStatuses, ["started", "succeeded", "started", "succeeded"]);
+        assert.equal(originalTurn.turnId === replacementTurn.turnId, action === "steer");
+        assert.lengthOf(completions, action === "steer" ? 1 : 2);
+        yield* adapter.stopSession(threadId);
+      }),
+    );
+  }
+
+  it.effect("retires Devin when cancellation is never acknowledged instead of reusing it", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-cancel-timeout");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({ T3_ACP_COMPLETE_FIRST_PROMPT_ON_CANCEL: "1" }),
+      );
+      const toolStarted = yield* Deferred.make<void>();
+      const cancelReceived = yield* Deferred.make<void>();
+      const sessionExited = yield* Deferred.make<void>();
+      let promptRequests = 0;
+      const adapter = yield* makeTestAdapter(wrapperPath, {
+        makeAcpRuntime: (input) =>
+          makeDevinAcpRuntime({
+            ...input,
+            devinSettings: { binaryPath: wrapperPath },
+            requestLogger: (event) =>
+              Effect.sync(() => {
+                if (event.method === "session/prompt" && event.status === "started") {
+                  promptRequests += 1;
+                }
+              }),
+            onSessionUpdate: (notification) =>
+              Effect.gen(function* () {
+                yield* input.onSessionUpdate?.(notification) ?? Effect.void;
+                if (notification.update.sessionUpdate === "tool_call") {
+                  yield* Deferred.succeed(toolStarted, undefined);
+                }
+                if (notification.update.sessionUpdate === "agent_thought_chunk") {
+                  yield* Deferred.succeed(cancelReceived, undefined);
+                }
+              }),
+          }),
+      });
+      yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.type === "session.exited" ? Deferred.succeed(sessionExited, undefined) : Effect.void,
+      ).pipe(Effect.forkChild);
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const first = yield* adapter
+        .sendTurn({ threadId, input: "stuck prompt", attachments: [] })
+        .pipe(Effect.result, Effect.forkChild);
+      yield* Deferred.await(toolStarted);
+      const replacement = yield* adapter
+        .sendTurn({ threadId, input: "replacement message", attachments: [] })
+        .pipe(Effect.result, Effect.forkChild);
+      yield* Deferred.await(cancelReceived);
+      yield* TestClock.adjust("15 seconds");
+      assert.equal((yield* Fiber.join(first))._tag, "Failure");
+      assert.equal((yield* Fiber.join(replacement))._tag, "Failure");
+      yield* Deferred.await(sessionExited);
+      assert.equal(promptRequests, 1);
+      assert.deepEqual(yield* adapter.listSessions(), []);
+    }),
+  );
+
+  it.effect("cancels an in-flight prompt when a mid-turn sendTurn steers", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-steer-cancels-in-flight");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-steer-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({
+          T3_ACP_HANG_FIRST_PROMPT_FOREVER: "1",
+          T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const firstTurnStarted = yield* Deferred.make<TurnId>();
+      const turnCompleted = yield* Deferred.make<void>();
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          runtimeEvents.push(event);
+          if (String(event.threadId) !== String(threadId)) {
+            return;
+          }
+          if (event.type === "turn.started" && event.turnId !== undefined) {
+            yield* Deferred.succeed(firstTurnStarted, event.turnId).pipe(Effect.ignore);
+            return;
+          }
+          if (event.type === "turn.completed") {
+            yield* Deferred.succeed(turnCompleted, undefined).pipe(Effect.ignore);
+          }
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      const firstSendTurnFiber = yield* adapter
+        .sendTurn({ threadId, input: "hang until steered", attachments: [] })
+        .pipe(Effect.forkChild);
+      const firstTurnId = yield* Deferred.await(firstTurnStarted).pipe(Effect.timeout("2 seconds"));
+      yield* waitForFileContent(requestLogPath, 80, '"method":"session/prompt"');
+
+      const steered = yield* adapter
+        .sendTurn({ threadId, input: "take this instead", attachments: [] })
+        .pipe(Effect.timeout("3 seconds"));
+      yield* Fiber.join(firstSendTurnFiber).pipe(Effect.timeout("3 seconds"));
+      yield* Deferred.await(turnCompleted).pipe(Effect.timeout("3 seconds"));
+
+      const requestLog = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      const methods = requestLog.flatMap((entry) =>
+        typeof entry.method === "string" ? [entry.method] : [],
+      );
+      const turnStartedEvents = runtimeEvents.filter(
+        (event) => event.type === "turn.started" && String(event.threadId) === String(threadId),
+      );
+      const turnCompletedEvents = runtimeEvents.filter(
+        (event): event is Extract<ProviderRuntimeEvent, { type: "turn.completed" }> =>
+          event.type === "turn.completed" && String(event.threadId) === String(threadId),
+      );
+      const readySessions = yield* adapter.listSessions();
+      const readySession = readySessions.find((session) => session.threadId === threadId);
+
+      assert.equal(String(steered.turnId), String(firstTurnId));
+      assert.isTrue(methods.includes("session/cancel"));
+      assert.isAtLeast(methods.filter((method) => method === "session/prompt").length, 2);
+      assert.lengthOf(turnStartedEvents, 1);
+      assert.lengthOf(turnCompletedEvents, 1);
+      assert.equal(turnCompletedEvents[0]?.payload.state, "completed");
+      assert.equal(readySession?.status, "ready");
+      assert.isUndefined(readySession?.activeTurnId);
+
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      yield* adapter.stopSession(threadId);
+    }).pipe(TestClock.withLive),
+  );
+
+  it.effect(
+    "steers a prompt that has not started ACP yet instead of letting it start after cancel",
+    () =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("devin-steer-during-prep");
+        const tempDir = yield* Effect.promise(() =>
+          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-steer-prep-")),
+        );
+        const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+        const wrapperPath = yield* Effect.promise(() =>
+          makeMockDevinWrapper({
+            T3_ACP_HANG_FIRST_PROMPT_FOREVER: "1",
+            T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+          }),
+        );
+        const adapter = yield* makeTestAdapter(wrapperPath);
+
+        const runtimeEvents: ProviderRuntimeEvent[] = [];
+        const firstTurnStarted = yield* Deferred.make<TurnId>();
+        const turnCompleted = yield* Deferred.make<void>();
+        const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.gen(function* () {
+            runtimeEvents.push(event);
+            if (String(event.threadId) !== String(threadId)) {
+              return;
+            }
+            if (event.type === "turn.started" && event.turnId !== undefined) {
+              yield* Deferred.succeed(firstTurnStarted, event.turnId).pipe(Effect.ignore);
+              return;
+            }
+            if (event.type === "turn.completed") {
+              yield* Deferred.succeed(turnCompleted, undefined).pipe(Effect.ignore);
+            }
+          }),
+        ).pipe(Effect.forkChild);
+
+        yield* adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("devin"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+
+        const firstSendTurnFiber = yield* adapter
+          .sendTurn({ threadId, input: "still preparing", attachments: [] })
+          .pipe(Effect.forkChild);
+        const firstTurnId = yield* Deferred.await(firstTurnStarted).pipe(
+          Effect.timeout("2 seconds"),
+        );
+
+        const steered = yield* adapter
+          .sendTurn({ threadId, input: "steer before first prompt starts", attachments: [] })
+          .pipe(Effect.timeout("3 seconds"));
+        yield* Fiber.join(firstSendTurnFiber).pipe(Effect.timeout("3 seconds"));
+        yield* Deferred.await(turnCompleted).pipe(Effect.timeout("3 seconds"));
+
+        const turnCompletedEvents = runtimeEvents.filter(
+          (event): event is Extract<ProviderRuntimeEvent, { type: "turn.completed" }> =>
+            event.type === "turn.completed" && String(event.threadId) === String(threadId),
+        );
+        const readySessions = yield* adapter.listSessions();
+        const readySession = readySessions.find((session) => session.threadId === threadId);
+
+        assert.equal(String(steered.turnId), String(firstTurnId));
+        assert.lengthOf(turnCompletedEvents, 1);
+        assert.equal(turnCompletedEvents[0]?.payload.state, "completed");
+        assert.equal(readySession?.status, "ready");
+        assert.isUndefined(readySession?.activeTurnId);
+
+        yield* Fiber.interrupt(runtimeEventsFiber);
+        yield* adapter.stopSession(threadId);
+      }).pipe(TestClock.withLive),
+  );
+
+  it.effect("keeps the original prompt running when a steer fails during preparation", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-failed-steer-keeps-original-prompt");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-failed-steer-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({
+          T3_ACP_HANG_FIRST_PROMPT_FOREVER: "1",
+          T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const firstTurnStarted = yield* Deferred.make<TurnId>();
+      const turnCompleted = yield* Deferred.make<void>();
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          runtimeEvents.push(event);
+          if (String(event.threadId) !== String(threadId)) {
+            return;
+          }
+          if (event.type === "turn.started" && event.turnId !== undefined) {
+            yield* Deferred.succeed(firstTurnStarted, event.turnId).pipe(Effect.ignore);
+            return;
+          }
+          if (event.type === "turn.completed") {
+            yield* Deferred.succeed(turnCompleted, undefined).pipe(Effect.ignore);
+          }
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      const firstSendTurnFiber = yield* adapter
+        .sendTurn({ threadId, input: "hang until a failed steer", attachments: [] })
+        .pipe(Effect.forkChild);
+      const firstTurnId = yield* Deferred.await(firstTurnStarted).pipe(Effect.timeout("2 seconds"));
+
+      const steerError = yield* Effect.flip(
+        adapter.sendTurn({
+          threadId,
+          input: "   ",
+          attachments: [],
+        }),
+      );
+      yield* waitForFileContent(requestLogPath, 80, '"method":"session/prompt"');
+      for (let yieldAttempt = 0; yieldAttempt < 8; yieldAttempt += 1) {
+        yield* Effect.yieldNow;
+      }
+
+      const sessionsAfterFailedSteer = yield* adapter.listSessions();
+      const sessionAfterFailedSteer = sessionsAfterFailedSteer.find(
+        (session) => session.threadId === threadId,
+      );
+      const completedBeforeInterrupt = runtimeEvents.filter(
+        (event): event is Extract<ProviderRuntimeEvent, { type: "turn.completed" }> =>
+          event.type === "turn.completed" && String(event.threadId) === String(threadId),
+      );
+
+      yield* adapter.interruptTurn(threadId, firstTurnId).pipe(Effect.timeout("2 seconds"));
+      yield* Fiber.join(firstSendTurnFiber).pipe(Effect.timeout("3 seconds"));
+      yield* Deferred.await(turnCompleted).pipe(Effect.timeout("3 seconds"));
+
+      const turnCompletedEvents = runtimeEvents.filter(
+        (event): event is Extract<ProviderRuntimeEvent, { type: "turn.completed" }> =>
+          event.type === "turn.completed" && String(event.threadId) === String(threadId),
+      );
+      const readySessions = yield* adapter.listSessions();
+      const readySession = readySessions.find((session) => session.threadId === threadId);
+
+      assert.equal(steerError._tag, "ProviderAdapterValidationError");
+      assert.equal(sessionAfterFailedSteer?.status, "running");
+      assert.equal(String(sessionAfterFailedSteer?.activeTurnId), String(firstTurnId));
+      assert.lengthOf(completedBeforeInterrupt, 0);
+      assert.lengthOf(turnCompletedEvents, 1);
+      assert.equal(String(turnCompletedEvents[0]?.turnId), String(firstTurnId));
+      assert.equal(turnCompletedEvents[0]?.payload.state, "cancelled");
+      assert.equal(readySession?.status, "ready");
+      assert.isUndefined(readySession?.activeTurnId);
+
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      yield* adapter.stopSession(threadId);
+    }).pipe(TestClock.withLive),
+  );
+
+  it.effect("drops late ACP notifications after a turn is cancelled", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-drop-late-cancelled-notifications");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({
+          T3_ACP_HANG_PROMPT_FOREVER: "1",
+          T3_ACP_EMIT_LATE_UPDATE_AFTER_CANCEL: "1",
+        }),
+      );
+      const lateNativeUpdate = yield* Deferred.make<void>();
+      const adapter = yield* makeTestAdapter(wrapperPath, {
+        nativeEventLogger: {
+          filePath: "memory://devin-cancelled-native-events",
+          write: (record: unknown) =>
+            JSON.stringify(record).includes("late after cancel")
+              ? Deferred.succeed(lateNativeUpdate, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+          close: () => Effect.void,
+        },
+      });
+
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const turnStarted = yield* Deferred.make<TurnId>();
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }).pipe(
+          Effect.andThen(
+            event.type === "turn.started" &&
+              event.turnId !== undefined &&
+              String(event.threadId) === String(threadId)
+              ? Deferred.succeed(turnStarted, event.turnId).pipe(Effect.asVoid)
+              : Effect.void,
+          ),
+        ),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      const sendTurnFiber = yield* adapter
+        .sendTurn({ threadId, input: "cancel before the late update", attachments: [] })
+        .pipe(Effect.forkChild);
+      const turnId = yield* Deferred.await(turnStarted).pipe(Effect.timeout("2 seconds"));
+      yield* adapter.interruptTurn(threadId, turnId).pipe(Effect.timeout("2 seconds"));
+      yield* Fiber.join(sendTurnFiber).pipe(Effect.timeout("2 seconds"));
+      yield* Deferred.await(lateNativeUpdate).pipe(Effect.timeout("2 seconds"));
+      for (let yieldAttempt = 0; yieldAttempt < 8; yieldAttempt += 1) {
+        yield* Effect.yieldNow;
+      }
+
+      const cancelledIndex = runtimeEvents.findIndex(
+        (event) =>
+          event.type === "turn.completed" &&
+          String(event.threadId) === String(threadId) &&
+          String(event.turnId) === String(turnId) &&
+          event.payload.state === "cancelled",
+      );
+      const turnOutputTypes = new Set([
+        "content.delta",
+        "item.started",
+        "item.updated",
+        "item.completed",
+        "turn.plan.updated",
+      ]);
+      const outputAfterCancellation = runtimeEvents
+        .slice(cancelledIndex + 1)
+        .filter(
+          (event) => String(event.threadId) === String(threadId) && turnOutputTypes.has(event.type),
+        );
+
+      assert.isAtLeast(cancelledIndex, 0);
+      assert.deepEqual(outputAfterCancellation, []);
+
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      yield* adapter.stopSession(threadId);
+    }).pipe(TestClock.withLive),
+  );
+
+  it.effect("keeps a stopped turn's tool completion off the next turn", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-stopped-tool-finishes-later");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({ T3_ACP_FINISH_CANCELLED_TOOL_IN_NEXT_PROMPT: "1" }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const toolStarted = yield* Deferred.make<TurnId>();
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }).pipe(
+          Effect.andThen(
+            event.type === "item.updated" &&
+              String(event.itemId) === "cancelled-tool" &&
+              event.turnId !== undefined
+              ? Deferred.succeed(toolStarted, event.turnId).pipe(Effect.asVoid)
+              : Effect.void,
+          ),
+        ),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      const firstTurn = yield* adapter
+        .sendTurn({ threadId, input: "run a long command", attachments: [] })
+        .pipe(Effect.forkChild);
+      const firstTurnId = yield* Deferred.await(toolStarted).pipe(Effect.timeout("2 seconds"));
+      yield* adapter.interruptTurn(threadId, firstTurnId).pipe(Effect.timeout("2 seconds"));
+      yield* Fiber.join(firstTurn).pipe(Effect.timeout("2 seconds"));
+
+      yield* adapter
+        .sendTurn({ threadId, input: "Reply with exactly: pong", attachments: [] })
+        .pipe(Effect.timeout("2 seconds"));
+
+      const secondTurnId = runtimeEvents.find(
+        (event) => event.type === "turn.started" && event.turnId !== firstTurnId,
+      )?.turnId;
+      assert.isDefined(secondTurnId);
+      const secondTurnEvents = runtimeEvents.filter((event) => event.turnId === secondTurnId);
+      assert.deepEqual(
+        secondTurnEvents.filter((event) => String(event.itemId) === "cancelled-tool"),
+        [],
+      );
+      assert.isTrue(
+        secondTurnEvents.some(
+          (event) => event.type === "content.delta" && event.payload.delta === "pong",
+        ),
+      );
+
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      yield* adapter.stopSession(threadId);
+    }).pipe(TestClock.withLive),
+  );
+
+  it.effect("settles the in-flight prompt before emitting completion", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-completion-before-next-turn");
+      const wrapperPath = yield* Effect.promise(() => makeMockDevinWrapper());
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const completedCountRef = yield* Ref.make(0);
+      const secondTurnCompleted = yield* Deferred.make<void>();
+
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) => {
+        if (event.type !== "turn.completed" || String(event.threadId) !== String(threadId)) {
+          return Effect.void;
+        }
+
+        return Ref.modify(completedCountRef, (count) => {
+          const nextCount = count + 1;
+          return [nextCount, nextCount] as const;
+        }).pipe(
+          Effect.flatMap((count) => {
+            if (count === 1) {
+              return adapter
+                .sendTurn({
+                  threadId,
+                  input: "second turn after completion",
+                  attachments: [],
+                })
+                .pipe(Effect.forkChild, Effect.asVoid);
+            }
+            if (count === 2) {
+              return Deferred.succeed(secondTurnCompleted, undefined).pipe(Effect.asVoid);
+            }
+            return Effect.void;
+          }),
+        );
+      }).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("devin"), model: "default" },
+      });
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "first turn",
+        attachments: [],
+      });
+      yield* Deferred.await(secondTurnCompleted);
+
+      const completedCount = yield* Ref.get(completedCountRef);
+      const readySessions = yield* adapter.listSessions();
+      const readySession = readySessions.find((session) => session.threadId === threadId);
+
+      assert.equal(completedCount, 2);
+      assert.equal(readySession?.status, "ready");
+      assert.isUndefined(readySession?.activeTurnId);
+
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("restores a Devin session to ready when the prompt RPC fails", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-prompt-failure-ready");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({
+          T3_ACP_FAIL_PROMPT: "1",
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("devin"), model: "default" },
+      });
+
+      const error = yield* Effect.flip(
+        adapter.sendTurn({
+          threadId,
+          input: "fail prompt",
+          attachments: [],
+        }),
+      );
+      const readySessions = yield* adapter.listSessions();
+      const readySession = readySessions.find((session) => session.threadId === threadId);
+      const failedTurnCompleted = runtimeEvents.find(
+        (event) => event.type === "turn.completed" && event.threadId === threadId,
+      );
+
+      assert.equal(error._tag, "ProviderAdapterRequestError");
+      assert.equal(readySession?.status, "ready");
+      assert.isUndefined(readySession?.activeTurnId);
+      assert.equal(failedTurnCompleted?.type, "turn.completed");
+      if (failedTurnCompleted?.type === "turn.completed") {
+        assert.equal(failedTurnCompleted.payload.state, "failed");
+        assert.isString(failedTurnCompleted.payload.errorMessage);
+      }
+
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("ignores replayed session/load updates when resuming a Devin session", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-load-replay-filter");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({
+          T3_ACP_EMIT_LOAD_REPLAY: "1",
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+
+      const session = yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("devin"), model: "default" },
+        resumeCursor: { schemaVersion: 1, sessionId: "mock-session-1" },
+      });
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "after resume",
+        attachments: [],
+      });
+
+      assert.deepStrictEqual(session.resumeCursor, {
+        schemaVersion: 1,
+        sessionId: "mock-session-1",
+      });
+      assert.isFalse(
+        runtimeEvents.some(
+          (event) => event.type === "item.completed" && event.payload.title === "Replay tool",
+        ),
+      );
+      assert.isFalse(
+        runtimeEvents.some(
+          (event) =>
+            event.type === "content.delta" && event.payload.delta === "replayed assistant text",
+        ),
+      );
+
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("rejects startSession when provider mismatches", () =>
+    Effect.gen(function* () {
+      const wrapperPath = yield* Effect.promise(() => makeMockDevinWrapper());
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const threadId = ThreadId.make("devin-provider-mismatch");
+
+      const error = yield* Effect.flip(
+        adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("cursor"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          modelSelection: { instanceId: ProviderInstanceId.make("devin"), model: "default" },
+        }),
+      );
+
+      assert.equal(error._tag, "ProviderAdapterValidationError");
+    }),
+  );
+
+  it.effect("rejects sendTurn with empty input and no attachments", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-empty-turn");
+
+      const wrapperPath = yield* Effect.promise(() => makeMockDevinWrapper());
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("devin"), model: "default" },
+      });
+
+      const error = yield* Effect.flip(
+        adapter.sendTurn({
+          threadId,
+          input: "   ",
+          attachments: [],
+        }),
+      );
+
+      assert.equal(error._tag, "ProviderAdapterValidationError");
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("responds to ACP approvals using provider-supplied option ids", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-custom-approval-option-id");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({
+          T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+          T3_ACP_EMIT_TOOL_CALLS: "1",
+          T3_ACP_ALLOW_ONCE_OPTION_ID: "agent-defined-approval-id",
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.type === "request.opened"
+          ? adapter.respondToRequest(
+              threadId,
+              ApprovalRequestId.make(String(event.requestId)),
+              "accept",
+            )
+          : Effect.void,
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "approval-required",
+      });
+      yield* adapter.sendTurn({ threadId, input: "approve this", attachments: [] });
+
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      assert.isTrue(
+        requests.some(
+          (entry) =>
+            !("method" in entry) &&
+            typeof entry.result === "object" &&
+            entry.result !== null &&
+            "outcome" in entry.result &&
+            typeof entry.result.outcome === "object" &&
+            entry.result.outcome !== null &&
+            "optionId" in entry.result.outcome &&
+            entry.result.outcome.optionId === "agent-defined-approval-id",
+        ),
+      );
+
+      yield* Fiber.interrupt(eventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("continues streaming events when native notification logging fails", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-native-log-failure");
+      const wrapperPath = yield* Effect.promise(() => makeMockDevinWrapper());
+      const adapter = yield* makeTestAdapter(wrapperPath, {
+        nativeEventLogger: {
+          filePath: "memory://devin-native-events",
+          write: (record: unknown) =>
+            typeof record === "object" &&
+            record !== null &&
+            "event" in record &&
+            typeof record.event === "object" &&
+            record.event !== null &&
+            "kind" in record.event &&
+            record.event.kind === "notification"
+              ? Effect.die(new Error("native log write failed"))
+              : Effect.void,
+          close: () => Effect.void,
+        },
+      });
+      const contentDelta = yield* Deferred.make<void>();
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.type === "content.delta" ? Deferred.succeed(contentDelta, undefined) : Effect.void,
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "keep streaming", attachments: [] });
+      yield* Deferred.await(contentDelta);
+
+      yield* Fiber.interrupt(eventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("resolves family model selection with options to concrete slug on start and turn", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-family-model-selection");
+      const configOptionCalls: Array<readonly [string, string | boolean]> = [];
+
+      const fakeRuntime = {
+        handleSessionUpdate: () => Effect.void,
+        handleRequestPermission: () => Effect.void,
+        handleExtNotification: () => Effect.void,
+        initialize: () => Effect.die(new Error("not used")),
+        start: () =>
+          Effect.succeed({
+            sessionId: "mock-session-1",
+            initializeResult: {} as EffectAcpSchema.InitializeResponse,
+            modelConfigId: "model",
+            sessionSetupResult: {
+              sessionId: "mock-session-1",
+              configOptions: [
+                {
+                  id: "model",
+                  name: "Model",
+                  category: "model",
+                  type: "select" as const,
+                  currentValue: "claude-opus-5-low",
+                  options: [
+                    { value: "claude-opus-5-low", name: "Claude Opus 5 Low" },
+                    { value: "claude-opus-5-high", name: "Claude Opus 5 High" },
+                  ],
+                },
+              ],
+            } as unknown as EffectAcpSchema.NewSessionResponse,
+          }),
+        getEvents: () => Stream.empty,
+        drainEvents: Effect.void,
+        getModeState: Effect.succeed(undefined),
+        getConfigOptions: Effect.succeed([]),
+        prompt: () =>
+          Effect.succeed({ stopReason: "end_turn" } as unknown as EffectAcpSchema.PromptResponse),
+        cancel: Effect.void,
+        setMode: () => Effect.die(new Error("not used")),
+        setConfigOption: (configId: string, value: string | boolean) => {
+          configOptionCalls.push([configId, value] as const);
+          return Effect.succeed({
+            configOptions: [],
+          } as unknown as EffectAcpSchema.SetSessionConfigOptionResponse);
+        },
+        setModel: () => Effect.die(new Error("not used")),
+        awaitTermination: Effect.never,
+      } as unknown as AcpSessionRuntime.AcpSessionRuntime["Service"];
+
+      const adapter = yield* makeDevinAdapter(decodeDevinSettings({}), {
+        makeAcpRuntime: () => Effect.succeed(fakeRuntime),
+      });
+
+      const session = yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("devin"),
+          model: "claude-opus-5",
+          options: [{ id: "reasoning", value: "high" }],
+        },
+      });
+
+      assert.equal(session.model, "claude-opus-5-high");
+      assert.deepStrictEqual(configOptionCalls, [["model", "claude-opus-5-high"]]);
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "test turn with model switch",
+        attachments: [],
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("devin"),
+          model: "claude-opus-5",
+          options: [{ id: "reasoning", value: "low" }],
+        },
+      });
+
+      assert.deepStrictEqual(configOptionCalls, [
+        ["model", "claude-opus-5-high"],
+        ["model", "claude-opus-5-low"],
+      ]);
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+});
+
+it("classifies transport-level ACP failures as connection lost", () => {
+  assert.isTrue(
+    isAcpConnectionLostError(new EffectAcpErrors.AcpProcessExitedError({ code: 1006 })),
+  );
+  assert.isTrue(
+    isAcpConnectionLostError(
+      new EffectAcpErrors.AcpTransportError({ operation: "call-rpc", cause: new Error("dead") }),
+    ),
+  );
+  assert.isTrue(isAcpConnectionLostError(new EffectAcpErrors.AcpInputStreamEndedError({})));
+  assert.isFalse(
+    isAcpConnectionLostError(
+      new EffectAcpErrors.AcpRequestError({ code: -32000, errorMessage: "quota exceeded" }),
+    ),
+  );
+});
