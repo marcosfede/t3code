@@ -28,6 +28,7 @@ import {
   decideToolCallUpdateEmission,
   extractModelConfigId,
   findSessionConfigOption,
+  isTerminalToolCallStatus,
   mergeToolCallState,
   toolCallProgressLength,
   parseSessionModeState,
@@ -39,6 +40,7 @@ import {
   type AcpSessionModeState,
   type AcpToolCallState,
 } from "./AcpRuntimeModel.ts";
+import { connectAcpWebSocketStdio } from "./AcpWebSocketStdio.ts";
 
 interface AcpToolCallTrackedState {
   readonly state: AcpToolCallState;
@@ -76,15 +78,34 @@ export interface AcpSpawnInput {
   readonly cwd?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly extendEnv?: boolean;
+  /**
+   * SIGTERM grace before SIGKILL when the runtime scope closes. Without it a
+   * deadlocked agent that never handles SIGTERM blocks scope close (and server
+   * shutdown) forever.
+   */
+  readonly forceKillAfter?: Duration.Input;
+}
+
+export interface AcpWebSocketInput {
+  readonly url: string;
 }
 
 export interface AcpSessionRuntimeOptions {
-  readonly spawn: AcpSpawnInput;
+  /** Child-process transport: spawns the agent CLI and speaks ACP over stdio.
+   * Exactly one of `spawn` or `webSocket` must be provided. */
+  readonly spawn?: AcpSpawnInput;
+  /** WebSocket transport: connects to a remote ACP endpoint carrying NDJSON
+   * JSON-RPC frames. Exactly one of `spawn` or `webSocket` must be provided. */
+  readonly webSocket?: AcpWebSocketInput;
   readonly cwd: string;
+  readonly acceptSessionUpdate?: (notification: EffectAcpSchema.SessionNotification) => boolean;
+  readonly onSessionUpdate?: (
+    notification: EffectAcpSchema.SessionNotification,
+  ) => Effect.Effect<void>;
   readonly resumeSessionId?: string;
   readonly resumeMethod?: "load" | "resume";
   readonly sessionLoadTimeout?: Duration.Input;
-  readonly sessionLoadReplayIdleGap?: Duration.Input;
+  readonly sessionLoadReplayIdleGap?: Duration.Input | null;
   /** Native cancellation waits for the prompt response and the getEvents consumer to drain. */
   readonly cancelBehavior?: "interrupt" | "wait-for-prompt";
   readonly cancelTimeout?: Duration.Input;
@@ -93,7 +114,9 @@ export interface AcpSessionRuntimeOptions {
     readonly name: string;
     readonly version: string;
   };
-  readonly authMethodId: string;
+  /** Auth method passed to `authenticate` after `initialize`; `null` skips the
+   * `authenticate` call entirely (for agents that only authenticate on demand). */
+  readonly authMethodId: string | null;
   readonly mcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   /** Extra workspace roots the agent may read and write besides `cwd`. */
   readonly additionalDirectories?: ReadonlyArray<string>;
@@ -228,6 +251,7 @@ export class AcpSessionRuntime extends Context.Service<
     readonly getEvents: () => Stream.Stream<AcpSessionRuntimeEvent, never>;
     /** Waits for queued events to be processed, or for the runtime scope to close. */
     readonly drainEvents: Effect.Effect<void>;
+    readonly finishPrompt: Effect.Effect<void>;
     /** Latest mode state observed from session setup and `session/update` notifications. */
     readonly getModeState: Effect.Effect<AcpSessionModeState | undefined>;
     /** Latest configuration options observed from session setup and configuration writes. */
@@ -292,6 +316,12 @@ export class AcpSessionRuntime extends Context.Service<
       method: string,
       payload: unknown,
     ) => Effect.Effect<void, EffectAcpErrors.AcpError>;
+    /**
+     * Fails once the underlying transport terminates (process exit or dead
+     * WebSocket). Never succeeds; callers race against it or watch it to tear
+     * down state bound to this runtime.
+     */
+    readonly awaitTermination: Effect.Effect<never, EffectAcpErrors.AcpError>;
   }
 >()("t3/provider/acp/AcpSessionRuntime") {}
 
@@ -363,6 +393,7 @@ export const make = (
     const activePromptRef = yield* Ref.make<Option.Option<AcpActivePrompt>>(Option.none());
     const assistantUpdatesOpenRef = yield* Ref.make(true);
     const sessionLoadGateRef = yield* Ref.make<Option.Option<SessionLoadGate>>(Option.none());
+    const terminationDeferred = yield* Deferred.make<never, EffectAcpErrors.AcpError>();
 
     const ensureConnected = Effect.gen(function* () {
       const error = yield* Ref.get(terminationErrorRef);
@@ -414,6 +445,7 @@ export const make = (
       if (!firstTermination) {
         return;
       }
+      yield* Deferred.fail(terminationDeferred, error);
       yield* closeActiveAssistantSegment({ queue: eventQueue, assistantSegmentRef });
       yield* Queue.offer(eventQueue, { _tag: "ConnectionTerminated", error: enriched });
     });
@@ -455,67 +487,101 @@ export const make = (
         ),
       );
 
-    const spawnCommand = yield* resolveSpawnCommand(options.spawn.command, options.spawn.args, {
-      ...(options.spawn.env ? { env: options.spawn.env } : {}),
-      extendEnv: options.spawn.extendEnv ?? true,
-    });
-    const child = yield* spawner
-      .spawn(
-        ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-          ...(options.spawn.cwd ? { cwd: options.spawn.cwd } : {}),
-          ...(options.spawn.env ? { env: options.spawn.env } : {}),
-          extendEnv: options.spawn.extendEnv ?? true,
-          shell: spawnCommand.shell,
-        }),
-      )
-      .pipe(
+    const acpClientOptions = {
+      ...(options.transformStdout ? { transformStdout: options.transformStdout } : {}),
+      ...(options.transformSessionUpdate
+        ? { transformSessionUpdate: options.transformSessionUpdate }
+        : {}),
+      onTermination: recordTermination,
+      ...(options.protocolLogging?.logIncoming !== undefined
+        ? { logIncoming: options.protocolLogging.logIncoming }
+        : {}),
+      ...(options.protocolLogging?.logOutgoing !== undefined
+        ? { logOutgoing: options.protocolLogging.logOutgoing }
+        : {}),
+      ...(options.protocolLogging?.logger ? { logger: options.protocolLogging.logger } : {}),
+    };
+
+    const transport = yield* Effect.gen(function* () {
+      const spawn = options.spawn;
+      if (spawn !== undefined) {
+        const spawnCommand = yield* resolveSpawnCommand(spawn.command, spawn.args, {
+          ...(spawn.env ? { env: spawn.env } : {}),
+          extendEnv: spawn.extendEnv ?? true,
+        });
+        const child = yield* spawner
+          .spawn(
+            ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+              ...(spawn.cwd ? { cwd: spawn.cwd } : {}),
+              ...(spawn.env ? { env: spawn.env } : {}),
+              extendEnv: spawn.extendEnv ?? true,
+              ...(spawn.forceKillAfter !== undefined
+                ? { forceKillAfter: spawn.forceKillAfter }
+                : {}),
+              shell: spawnCommand.shell,
+            }),
+          )
+          .pipe(
+            Effect.provideService(Scope.Scope, runtimeScope),
+            Effect.mapError(
+              (cause) =>
+                new EffectAcpErrors.AcpSpawnError({
+                  command: spawn.command,
+                  cause,
+                }),
+            ),
+          );
+
+        yield* child.stderr.pipe(
+          Stream.decodeText(),
+          Stream.runForEach((chunk) =>
+            Ref.update(stderrTailRef, (current) => appendAcpStderrTail(current, chunk)).pipe(
+              Effect.andThen(
+                options.onStderr ? options.onStderr(chunk.slice(-maxStderrChunkLength)) : Effect.void,
+              ),
+              Effect.catch((error) =>
+                Effect.gen(function* () {
+                  yield* Deferred.fail(stderrFailure, error);
+                  yield* recordTermination(error);
+                  yield* child.kill({ forceKillAfter: "1 second" }).pipe(Effect.ignore);
+                }),
+              ),
+            ),
+          ),
+          Effect.ensuring(Deferred.succeed(stderrDrained, undefined)),
+          Effect.ignore,
+          Effect.forkIn(runtimeScope),
+        );
+
+        return {
+          layer: EffectAcpClient.layerChildProcess(child, acpClientOptions),
+          terminate: child.kill({ forceKillAfter: "1 second" }).pipe(Effect.ignore),
+        };
+      }
+      if (options.webSocket === undefined) {
+        return yield* Effect.die(
+          new Error("AcpSessionRuntime requires exactly one of `spawn` or `webSocket`"),
+        );
+      }
+      const webSocketStdio = yield* connectAcpWebSocketStdio(options.webSocket.url).pipe(
         Effect.provideService(Scope.Scope, runtimeScope),
-        Effect.mapError(
-          (cause) =>
-            new EffectAcpErrors.AcpSpawnError({
-              command: options.spawn.command,
-              cause,
-            }),
-        ),
       );
-
-    yield* child.stderr.pipe(
-      Stream.decodeText(),
-      Stream.runForEach((chunk) =>
-        Ref.update(stderrTailRef, (current) => appendAcpStderrTail(current, chunk)).pipe(
-          Effect.andThen(
-            options.onStderr ? options.onStderr(chunk.slice(-maxStderrChunkLength)) : Effect.void,
-          ),
-          Effect.catch((error) =>
-            Effect.gen(function* () {
-              yield* Deferred.fail(stderrFailure, error);
-              yield* recordTermination(error);
-              yield* child.kill({ forceKillAfter: "1 second" }).pipe(Effect.ignore);
-            }),
+      return {
+        layer: Layer.effect(
+          EffectAcpClient.AcpClient,
+          EffectAcpClient.make(
+            webSocketStdio.stdio,
+            acpClientOptions,
+            webSocketStdio.terminationError,
           ),
         ),
-      ),
-      Effect.ensuring(Deferred.succeed(stderrDrained, undefined)),
-      Effect.ignore,
-      Effect.forkIn(runtimeScope),
-    );
+        terminate: webSocketStdio.close,
+      };
+    });
 
-    const acpContext = yield* Layer.build(
-      EffectAcpClient.layerChildProcess(child, {
-        ...(options.transformStdout ? { transformStdout: options.transformStdout } : {}),
-        ...(options.transformSessionUpdate
-          ? { transformSessionUpdate: options.transformSessionUpdate }
-          : {}),
-        onTermination: recordTermination,
-        ...(options.protocolLogging?.logIncoming !== undefined
-          ? { logIncoming: options.protocolLogging.logIncoming }
-          : {}),
-        ...(options.protocolLogging?.logOutgoing !== undefined
-          ? { logOutgoing: options.protocolLogging.logOutgoing }
-          : {}),
-        ...(options.protocolLogging?.logger ? { logger: options.protocolLogging.logger } : {}),
-      }),
-    ).pipe(Effect.provideService(Scope.Scope, runtimeScope));
+    const acpContext = yield* Layer.build(transport.layer).pipe(
+      Effect.provideService(Scope.Scope, runtimeScope),
+    );
 
     const acp = yield* Effect.service(EffectAcpClient.AcpClient).pipe(Effect.provide(acpContext));
 
@@ -551,11 +617,22 @@ export const make = (
               }),
             );
           }
-          if (sessionUpdateIsReplay(notification)) {
+          const accepted = options.acceptSessionUpdate?.(notification);
+          if (options.onSessionUpdate) {
+            yield* options.onSessionUpdate(notification);
+          }
+          if (
+            accepted === false ||
+            (accepted === undefined && sessionUpdateIsReplay(notification))
+          ) {
             return;
           }
           const startState = yield* Ref.get(startStateRef);
           if (startState._tag === "Starting") {
+            if (accepted === true && notification.sessionId === options.resumeSessionId) {
+              yield* processSessionUpdate(notification);
+              return;
+            }
             if (isStartupMetadataUpdate(notification)) {
               yield* Ref.update(startupMetadataRef, (current) =>
                 [
@@ -737,15 +814,17 @@ export const make = (
     const startOnce = Effect.gen(function* () {
       const initializeResult = yield* sendInitialize;
 
-      const authenticatePayload = {
-        methodId: options.authMethodId,
-      } satisfies EffectAcpSchema.AuthenticateRequest;
+      if (options.authMethodId !== null) {
+        const authenticatePayload = {
+          methodId: options.authMethodId,
+        } satisfies EffectAcpSchema.AuthenticateRequest;
 
-      yield* runLoggedRequest(
-        "authenticate",
-        authenticatePayload,
-        acp.agent.authenticate(authenticatePayload),
-      );
+        yield* runLoggedRequest(
+          "authenticate",
+          authenticatePayload,
+          acp.agent.authenticate(authenticatePayload),
+        );
+      }
 
       let sessionId: string;
       let sessionSetupResult:
@@ -819,9 +898,11 @@ export const make = (
             status: "started",
           });
 
-          const idleFiber = yield* waitForSessionLoadReplayIdle({
-            gateRef: sessionLoadGateRef,
-          }).pipe(Effect.forkIn(runtimeScope));
+          const idleFiber = yield* (
+            options.sessionLoadReplayIdleGap === null
+              ? Effect.never
+              : waitForSessionLoadReplayIdle({ gateRef: sessionLoadGateRef })
+          ).pipe(Effect.forkIn(runtimeScope));
           const loaded = yield* Effect.raceFirst(
             acp.agent.loadSession(loadPayload),
             Fiber.join(idleFiber),
@@ -960,7 +1041,7 @@ export const make = (
       error: EffectAcpErrors.AcpError,
     ) {
       yield* recordTermination(error);
-      yield* child.kill({ forceKillAfter: "1 second" }).pipe(Effect.ignore);
+      yield* transport.terminate;
     });
 
     const cancel = Effect.gen(function* () {
@@ -1022,6 +1103,7 @@ export const make = (
       start: () => start,
       getEvents: () => Stream.fromQueue(eventQueue),
       drainEvents,
+      finishPrompt: closeActiveAssistantSegment({ queue: eventQueue, assistantSegmentRef }),
       getModeState: Ref.get(modeStateRef),
       getConfigOptions: Ref.get(configOptionsRef),
       prompt: (payload, promptOptions?) =>
@@ -1127,6 +1209,7 @@ export const make = (
         ),
       notify: (method, payload) =>
         ensureConnected.pipe(Effect.andThen(acp.raw.notify(method, payload))),
+      awaitTermination: Deferred.await(terminationDeferred),
     } satisfies AcpSessionRuntime["Service"];
   });
 
@@ -1217,8 +1300,14 @@ const handleSessionUpdate = ({
             skippedSinceEmit: tracked?.skippedSinceEmit ?? 0,
           });
           const next = new Map(current);
-          if (nextToolCall.status === "completed" || nextToolCall.status === "failed") {
-            next.delete(nextToolCall.toolCallId);
+          if (nextToolCall.status && isTerminalToolCallStatus(nextToolCall.status)) {
+            // Remember only that it finished, so late updates are dropped
+            // without holding onto the tool output.
+            next.set(nextToolCall.toolCallId, {
+              state: { toolCallId: nextToolCall.toolCallId, status: nextToolCall.status, data: {} },
+              lastEmittedDetailLength: undefined,
+              skippedSinceEmit: 0,
+            });
           } else {
             next.set(nextToolCall.toolCallId, {
               state: nextToolCall,
