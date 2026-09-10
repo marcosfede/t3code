@@ -828,7 +828,7 @@ export function makeDevinAdapter(
             | undefined;
           const normalizeTool = makeDevinToolNormalizer();
           const normalizeReferences = makeDevinReferenceNormalizer({
-            cloud: provider === "devinCloud",
+            cloud: provider === "devinCloud" || provider === "devinCloudCli",
             sessionMetadata: started.sessionSetupResult._meta,
           });
           const normalizedEvents = acp.getEvents().pipe(

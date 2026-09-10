@@ -19,6 +19,7 @@ export const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>
   [ProviderDriverKind.make("antigravity")]: AntigravityIcon,
   [ProviderDriverKind.make("devin")]: DevinIcon,
   [ProviderDriverKind.make("devinCloud")]: DevinIcon,
+  [ProviderDriverKind.make("devinCloudCli")]: DevinIcon,
 };
 
 export type ModelEsque = {
