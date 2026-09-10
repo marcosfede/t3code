@@ -4,6 +4,7 @@ import {
   CodexSettings,
   CursorSettings,
   DevinCloudSettings,
+  DevinCloudCliSettings,
   DevinSettings,
   GrokSettings,
   OpenCodeSettings,
@@ -82,10 +83,17 @@ const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = [
   },
   {
     value: ProviderDriverKind.make("devinCloud"),
-    label: "Devin Cloud",
+    label: "Devin Cloud (Websockets)",
     icon: DevinIcon,
     badgeLabel: "Early Access",
     settingsSchema: DevinCloudSettings,
+  },
+  {
+    value: ProviderDriverKind.make("devinCloudCli"),
+    label: "Devin Cloud (CLI)",
+    icon: DevinIcon,
+    badgeLabel: "Early Access",
+    settingsSchema: DevinCloudCliSettings,
   },
   {
     value: ProviderDriverKind.make("opencode"),

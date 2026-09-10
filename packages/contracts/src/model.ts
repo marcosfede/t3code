@@ -149,6 +149,7 @@ const CURSOR_DRIVER_KIND = ProviderDriverKind.make("cursor");
 const GROK_DRIVER_KIND = ProviderDriverKind.make("grok");
 const DEVIN_DRIVER_KIND = ProviderDriverKind.make("devin");
 const DEVIN_CLOUD_DRIVER_KIND = ProviderDriverKind.make("devinCloud");
+const DEVIN_CLOUD_CLI_DRIVER_KIND = ProviderDriverKind.make("devinCloudCli");
 const OPENCODE_DRIVER_KIND = ProviderDriverKind.make("opencode");
 
 export const DEFAULT_MODEL = "gpt-5.6-sol";
@@ -176,6 +177,7 @@ export const DEFAULT_MODEL_BY_PROVIDER: Partial<Record<ProviderDriverKind, strin
   [GROK_DRIVER_KIND]: "grok-build",
   [DEVIN_DRIVER_KIND]: "swe-1-6-fast",
   [DEVIN_CLOUD_DRIVER_KIND]: DEVIN_CLOUD_DEFAULT_MODEL,
+  [DEVIN_CLOUD_CLI_DRIVER_KIND]: DEVIN_CLOUD_DEFAULT_MODEL,
   [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
   [ProviderDriverKind.make("antigravity")]: ANTIGRAVITY_DEFAULT_MODEL,
 };
@@ -217,6 +219,7 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
   },
   [DEVIN_DRIVER_KIND]: {},
   [DEVIN_CLOUD_DRIVER_KIND]: {},
+  [DEVIN_CLOUD_CLI_DRIVER_KIND]: {},
   [OPENCODE_DRIVER_KIND]: {},
 };
 
@@ -229,6 +232,7 @@ export const PROVIDER_DISPLAY_NAMES: Partial<Record<ProviderDriverKind, string>>
   [CURSOR_DRIVER_KIND]: "Cursor",
   [GROK_DRIVER_KIND]: "Grok",
   [DEVIN_DRIVER_KIND]: "Devin",
-  [DEVIN_CLOUD_DRIVER_KIND]: "Devin Cloud",
+  [DEVIN_CLOUD_DRIVER_KIND]: "Devin Cloud (Websockets)",
+  [DEVIN_CLOUD_CLI_DRIVER_KIND]: "Devin Cloud (CLI)",
   [OPENCODE_DRIVER_KIND]: "OpenCode",
 };

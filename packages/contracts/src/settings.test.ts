@@ -72,6 +72,25 @@ describe("ServerSettings usage price overrides", () => {
   });
 });
 
+describe("Devin Cloud CLI settings", () => {
+  it("defaults to devin-insiders and accepts an alternate relay binary", () => {
+    expect(decodeServerSettings({}).providers.devinCloudCli).toMatchObject({
+      enabled: false,
+      binaryPath: "devin-insiders",
+    });
+    expect(
+      decodeServerSettings({
+        providers: { devinCloudCli: { binaryPath: "  /opt/devin  " } },
+      }).providers.devinCloudCli.binaryPath,
+    ).toBe("/opt/devin");
+    expect(
+      decodeServerSettingsPatch({
+        providers: { devinCloudCli: { enabled: false, binaryPath: "devin" } },
+      }).providers?.devinCloudCli,
+    ).toEqual({ enabled: false, binaryPath: "devin" });
+  });
+});
+
 describe("custom model settings", () => {
   const capabilities = {
     optionDescriptors: [
@@ -94,7 +113,7 @@ describe("custom model settings", () => {
     ]);
   });
 
-  it.each(["devin", "devinCloud"] as const)(
+  it.each(["devin", "devinCloud", "devinCloudCli"] as const)(
     "round-trips structured and legacy custom models for %s",
     (provider) => {
       const customModels = ["bare-slug", { slug: "named", name: "Named", capabilities }];

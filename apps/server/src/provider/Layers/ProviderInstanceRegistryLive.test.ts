@@ -44,7 +44,7 @@ import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
-import type { BuiltInDriversEnv } from "../builtInDrivers.ts";
+import { BUILT_IN_DRIVERS, type BuiltInDriversEnv } from "../builtInDrivers.ts";
 import { AntigravityInstallation } from "../AntigravityInstallation.ts";
 import { ServerConfig } from "../../config.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
@@ -460,6 +460,41 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
     Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
     Layer.provideMerge(ModelManifest.layerTest),
     Layer.provideMerge(CodexResetCredit.layerTest),
+  );
+
+  it.live("keeps direct and CLI-backed Devin Cloud instances independent", () =>
+    Effect.gen(function* () {
+      const directId = ProviderInstanceId.make("cloud-direct");
+      const cliId = ProviderInstanceId.make("cloud-cli");
+      const { registry } = yield* makeProviderInstanceRegistry({
+        drivers: BUILT_IN_DRIVERS,
+        configMap: {
+          [directId]: { driver: ProviderDriverKind.make("devinCloud"), enabled: false, config: {} },
+          [cliId]: { driver: ProviderDriverKind.make("devinCloudCli"), enabled: false, config: {} },
+        },
+      });
+      expect(yield* registry.listUnavailable).toEqual([]);
+      const direct = yield* registry.getInstance(directId);
+      const cli = yield* registry.getInstance(cliId);
+      expect(direct).toBeDefined();
+      expect(cli).toBeDefined();
+      expect(direct!.adapter).not.toBe(cli!.adapter);
+      expect(direct!.continuationIdentity.continuationKey).not.toBe(
+        cli!.continuationIdentity.continuationKey,
+      );
+      expect(yield* direct!.snapshot.getSnapshot).toMatchObject({
+        instanceId: directId,
+        driver: "devinCloud",
+        displayName: "Devin Cloud (Websockets)",
+        status: "disabled",
+      });
+      expect(yield* cli!.snapshot.getSnapshot).toMatchObject({
+        instanceId: cliId,
+        driver: "devinCloudCli",
+        displayName: "Devin Cloud (CLI)",
+        status: "disabled",
+      });
+    }).pipe(Effect.provide(testLayer)),
   );
 
   it.live("boots one instance of every shipped driver from a single config map", () =>

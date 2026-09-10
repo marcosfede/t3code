@@ -846,6 +846,25 @@ export const DevinCloudSettings = makeProviderSettingsSchema(
 );
 export type DevinCloudSettings = typeof DevinCloudSettings.Type;
 
+export const DevinCloudCliSettings = makeProviderSettingsSchema(
+  {
+    ...DevinSettings.fields,
+    enabled: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    binaryPath: makeBinaryPathSetting("devin-insiders").pipe(
+      Schema.annotateKey({
+        title: "Binary path",
+        description: "Path to a Devin CLI binary supporting `acp --cloud`.",
+        providerSettingsForm: { placeholder: "devin-insiders", clearWhenEmpty: "omit" },
+      }),
+    ),
+  },
+  { order: ["binaryPath"] },
+);
+export type DevinCloudCliSettings = typeof DevinCloudCliSettings.Type;
+
 export const OpenCodeSettings = makeProviderSettingsSchema(
   {
     // Off by default (like Cursor and Grok): the binding is not yet stable
@@ -1101,6 +1120,7 @@ export const ServerSettings = Schema.Struct({
     grok: GrokSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     devin: DevinSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     devinCloud: DevinCloudSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+    devinCloudCli: DevinCloudCliSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     opencode: OpenCodeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     antigravity: AntigravitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   }).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
@@ -1345,6 +1365,7 @@ export const ServerSettingsPatch = Schema.Struct({
       grok: Schema.optionalKey(GrokSettingsPatch),
       devin: Schema.optionalKey(DevinSettingsPatch),
       devinCloud: Schema.optionalKey(DevinCloudSettingsPatch),
+      devinCloudCli: Schema.optionalKey(DevinSettingsPatch),
       opencode: Schema.optionalKey(OpenCodeSettingsPatch),
       antigravity: Schema.optionalKey(AntigravitySettingsPatch),
     }),

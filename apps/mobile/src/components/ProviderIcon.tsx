@@ -73,7 +73,11 @@ export function ProviderIcon(props: ProviderIconProps) {
     );
   }
 
-  if (props.provider === "devin" || props.provider === "devinCloud") {
+  if (
+    props.provider === "devin" ||
+    props.provider === "devinCloud" ||
+    props.provider === "devinCloudCli"
+  ) {
     return (
       <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
         <Path d="M4 6h13" stroke={mono} strokeWidth={2.4} strokeLinecap="round" />

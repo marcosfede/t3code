@@ -36,6 +36,17 @@ On web and desktop, use Settings → Providers → **Models** to add an unlisted
 name and options. Only options supported by the provider integration affect turns. Antigravity
 uses its account catalog and does not support custom models.
 
+## Devin Cloud through the CLI
+
+To use your CLI login for Cloud sessions, run `devin-insiders auth login` on the machine
+running your T3 Code environment, then enable **Devin Cloud (CLI)** in Settings → Providers.
+You can configure another binary that supports `acp --cloud`. This provider is separate from
+**Devin Cloud (Websockets)**, which connects directly.
+
+The model picker starts with **Default** and learns available models when you create or resume
+a Cloud session. Availability checks do not create sessions. Use another provider for automatic
+commit messages and thread titles to avoid creating Cloud sessions for those tasks.
+
 ## Devin Cloud interruptions
 
 If the connection to Devin Cloud drops while your environment is running, T3 Code automatically

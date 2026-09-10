@@ -42,7 +42,7 @@ import type { ServerProviderShape } from "../Services/ServerProvider.ts";
 import { buildDevinDiscoveredModelsFromSessionSetup } from "./DevinProvider.ts";
 
 const DEVIN_CLOUD_PRESENTATION = {
-  displayName: "Devin Cloud",
+  displayName: "Devin Cloud (Websockets)",
   badgeLabel: "Early Access",
   showInteractionModeToggle: false,
   requiresNewThreadForModelChange: false,
