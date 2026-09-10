@@ -265,7 +265,7 @@ it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
     );
   }
 
-  for (const provider of ["devin", "devinCloud"] as const) {
+  for (const provider of ["devin", "devinCloud", "devinCloudCli"] as const) {
     it.effect(`publishes ${provider} thinking previews and retains Cloud tool metadata`, () =>
       Effect.gen(function* () {
         const threadId = ThreadId.make(`devin-activity-${provider}`);

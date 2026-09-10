@@ -1,22 +1,17 @@
-import { DevinCloudSettings, ProviderDriverKind, type ServerProvider } from "@t3tools/contracts";
+import { DevinCloudCliSettings, ProviderDriverKind, type ServerProvider } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
-import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
-import * as EffectAcpErrors from "effect-acp/errors";
 
-import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
-import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { makeDevinCloudTextGeneration } from "../../textGeneration/DevinCloudTextGeneration.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeDevinAdapter } from "../Layers/DevinAdapter.ts";
+import { checkDevinCloudCliProviderStatus } from "../Layers/DevinCloudCliProvider.ts";
 import {
   buildInitialDevinCloudProviderSnapshot,
-  checkDevinCloudProviderStatus,
   enrichDevinCloudSnapshot,
   makeDevinCloudModelDiscovery,
 } from "../Layers/DevinCloudProvider.ts";
@@ -35,58 +30,30 @@ import {
   makeProviderSnapshotSettingsSource,
   type ProviderSnapshotSettings,
 } from "../providerUpdateSettings.ts";
-import {
-  loadDevinCloudCredentials,
-  makeDevinCloudAcpRuntime,
-} from "../acp/DevinCloudAcpSupport.ts";
-import { type DevinAcpRuntimeFactory } from "../acp/DevinAcpSupport.ts";
+import { makeDevinCloudCliAcpRuntime } from "../acp/DevinCloudCliAcpSupport.ts";
+import type { DevinDriverEnv } from "./DevinDriver.ts";
 
-const decodeDevinCloudSettings = Schema.decodeSync(DevinCloudSettings);
-
-const DRIVER_KIND = ProviderDriverKind.make("devinCloud");
+const decodeSettings = Schema.decodeSync(DevinCloudCliSettings);
+const DRIVER_KIND = ProviderDriverKind.make("devinCloudCli");
 const maintenanceCapabilities = makeManualOnlyProviderMaintenanceCapabilities({
   provider: DRIVER_KIND,
   packageName: null,
 });
 
-export type DevinCloudDriverEnv =
-  | BackgroundPolicy.BackgroundPolicy
-  | ChildProcessSpawner.ChildProcessSpawner
-  | Crypto.Crypto
-  | FileSystem.FileSystem
-  | HttpClient.HttpClient
-  | Path.Path
-  | ProviderEventLoggers
-  | ServerConfig
-  | ServerSettingsService;
+export type DevinCloudCliDriverEnv = DevinDriverEnv;
 
-const withInstanceIdentity =
-  (input: {
-    readonly instanceId: ProviderInstance["instanceId"];
-    readonly displayName: string | undefined;
-    readonly accentColor: string | undefined;
-    readonly continuationGroupKey: string;
-  }) =>
-  (snapshot: ServerProviderDraft): ServerProvider => ({
-    ...snapshot,
-    instanceId: input.instanceId,
-    driver: DRIVER_KIND,
-    ...(input.displayName ? { displayName: input.displayName } : {}),
-    ...(input.accentColor ? { accentColor: input.accentColor } : {}),
-    continuation: { groupKey: input.continuationGroupKey },
-  });
-
-export const DevinCloudDriver: ProviderDriver<DevinCloudSettings, DevinCloudDriverEnv> = {
+export const DevinCloudCliDriver: ProviderDriver<DevinCloudCliSettings, DevinCloudCliDriverEnv> = {
   driverKind: DRIVER_KIND,
   metadata: {
-    displayName: "Devin Cloud (Websockets)",
+    displayName: "Devin Cloud (CLI)",
     supportsMultipleInstances: true,
   },
-  configSchema: DevinCloudSettings,
-  defaultConfig: (): DevinCloudSettings => decodeDevinCloudSettings({}),
+  configSchema: DevinCloudCliSettings,
+  defaultConfig: () => decodeSettings({}),
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
+      const crypto = yield* Crypto.Crypto;
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
@@ -95,42 +62,34 @@ export const DevinCloudDriver: ProviderDriver<DevinCloudSettings, DevinCloudDriv
         driverKind: DRIVER_KIND,
         instanceId,
       });
-      const stampIdentity = withInstanceIdentity({
+      const stampIdentity = (snapshot: ServerProviderDraft): ServerProvider => ({
+        ...snapshot,
         instanceId,
-        displayName,
-        accentColor,
-        continuationGroupKey: continuationIdentity.continuationKey,
+        driver: DRIVER_KIND,
+        displayName: displayName || "Devin Cloud (CLI)",
+        ...(accentColor ? { accentColor } : {}),
+        continuation: { groupKey: continuationIdentity.continuationKey },
       });
-      const effectiveConfig = { ...config, enabled } satisfies DevinCloudSettings;
+      const effectiveConfig = { ...config, enabled } satisfies DevinCloudCliSettings;
       const modelDiscovery = yield* makeDevinCloudModelDiscovery(effectiveConfig.customModels);
-
-      const makeAcpRuntime: DevinAcpRuntimeFactory = (runtimeInput) =>
-        loadDevinCloudCredentials(effectiveConfig, processEnv).pipe(
-          Effect.provideService(FileSystem.FileSystem, fileSystem),
-          Effect.mapError((cause) => new EffectAcpErrors.AcpSpawnError({ cause })),
-          Effect.flatMap((credentials) =>
-            makeDevinCloudAcpRuntime({ ...runtimeInput, credentials }),
-          ),
-          Effect.map(modelDiscovery.observeRuntime),
-        );
-
       const adapter = yield* makeDevinAdapter(null, {
         environment: processEnv,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
         instanceId,
         provider: DRIVER_KIND,
-        makeAcpRuntime,
+        makeAcpRuntime: (input) =>
+          makeDevinCloudCliAcpRuntime({ ...input, settings: effectiveConfig }).pipe(
+            Effect.map(modelDiscovery.observeRuntime),
+          ),
       });
-      const textGeneration = makeDevinCloudTextGeneration();
-
-      const checkProvider = checkDevinCloudProviderStatus(effectiveConfig, processEnv).pipe(
+      const checkProvider = checkDevinCloudCliProviderStatus(effectiveConfig, processEnv).pipe(
         Effect.map(stampIdentity),
-        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       );
-
       const snapshotSettings = makeProviderSnapshotSettingsSource(effectiveConfig, serverSettings);
       const snapshot = yield* makeManagedServerProvider<
-        ProviderSnapshotSettings<DevinCloudSettings>
+        ProviderSnapshotSettings<DevinCloudCliSettings>
       >({
         resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
         getSettings: snapshotSettings.getSettings,
@@ -153,12 +112,11 @@ export const DevinCloudDriver: ProviderDriver<DevinCloudSettings, DevinCloudDriv
             new ProviderDriverError({
               driver: DRIVER_KIND,
               instanceId,
-              detail: `Failed to build Devin Cloud snapshot: ${cause.message ?? String(cause)}`,
+              detail: `Failed to build Devin Cloud CLI snapshot: ${cause.message ?? String(cause)}`,
               cause,
             }),
         ),
       );
-
       return {
         instanceId,
         driverKind: DRIVER_KIND,
@@ -168,7 +126,7 @@ export const DevinCloudDriver: ProviderDriver<DevinCloudSettings, DevinCloudDriv
         enabled,
         snapshot: modelDiscovery.decorate(snapshot),
         adapter,
-        textGeneration,
+        textGeneration: makeDevinCloudTextGeneration(),
       } satisfies ProviderInstance;
     }),
 };

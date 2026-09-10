@@ -720,7 +720,7 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
         ]);
       });
 
-      it.each(["devin", "devinCloud"])(
+      it.each(["devin", "devinCloud", "devinCloudCli"])(
         "replaces %s models after discovery but retains them while probing or failing",
         (driver) => {
           const previousProvider = {
