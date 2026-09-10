@@ -55,12 +55,17 @@ const DEVIN_CLOUD_ACP_PROBE_TIMEOUT_MS = 10_000;
 
 const DEFAULT_CLOUD_MODELS: ReadonlyArray<ServerProviderModel> = [
   {
-    slug: DEVIN_CLOUD_DEFAULT_MODEL,
-    name: "Default",
+    slug: "devin-2-5",
+    name: "Normal",
+    aliases: [DEVIN_CLOUD_DEFAULT_MODEL],
     isCustom: false,
     isDefault: true,
     capabilities: EMPTY_CAPABILITIES,
   },
+  { slug: "devin-fast-opus", name: "Fast", isCustom: false, capabilities: EMPTY_CAPABILITIES },
+  { slug: "devin-ultra", name: "Ultra", isCustom: false, capabilities: EMPTY_CAPABILITIES },
+  { slug: "devin_lite", name: "Lite", isCustom: false, capabilities: EMPTY_CAPABILITIES },
+  { slug: "devin-auto", name: "Fusion", isCustom: false, capabilities: EMPTY_CAPABILITIES },
 ];
 
 function devinCloudModels(
