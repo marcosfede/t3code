@@ -33,10 +33,14 @@ const emitActiveToolThenHang = process.env.T3_ACP_EMIT_ACTIVE_TOOL_THEN_HANG ===
 const emitForeignSessionUpdates = process.env.T3_ACP_EMIT_FOREIGN_SESSION_UPDATES === "1";
 const waitForResumeRelease = process.env.T3_ACP_WAIT_FOR_RESUME_RELEASE === "1";
 const completeFirstPromptOnCancel = process.env.T3_ACP_COMPLETE_FIRST_PROMPT_ON_CANCEL === "1";
+const completeHangingPromptOnCancel = process.env.T3_ACP_COMPLETE_HANGING_PROMPT_ON_CANCEL === "1";
 const floodStderr = process.env.T3_ACP_FLOOD_STDERR === "1";
 const hangPromptForever = process.env.T3_ACP_HANG_PROMPT_FOREVER === "1";
+const exitAfterSessionMs = Number(process.env.T3_ACP_EXIT_AFTER_SESSION_MS ?? "0");
 const hangFirstPromptForever = process.env.T3_ACP_HANG_FIRST_PROMPT_FOREVER === "1";
 const emitLateUpdateAfterCancel = process.env.T3_ACP_EMIT_LATE_UPDATE_AFTER_CANCEL === "1";
+const finishCancelledToolInNextPrompt =
+  process.env.T3_ACP_FINISH_CANCELLED_TOOL_IN_NEXT_PROMPT === "1";
 const omitXAiPromptCompleteStopReason =
   process.env.T3_ACP_OMIT_XAI_PROMPT_COMPLETE_STOP_REASON === "1";
 const failLoadSession = process.env.T3_ACP_FAIL_LOAD_SESSION === "1";
@@ -436,6 +440,11 @@ const program = Effect.gen(function* () {
       if (antigravityProfile) {
         yield* publishAntigravityCommands(sessionId);
       }
+      if (exitAfterSessionMs > 0) {
+        Effect.runFork(
+          Effect.sleep(exitAfterSessionMs).pipe(Effect.andThen(Effect.sync(() => process.exit(0)))),
+        );
+      }
       return {
         sessionId,
         modes: modeState(),
@@ -588,6 +597,9 @@ const program = Effect.gen(function* () {
     Effect.gen(function* () {
       const cancelledSessionId = String(sessionId ?? "mock-session-1");
       cancelledSessions.add(cancelledSessionId);
+      if (completeHangingPromptOnCancel) {
+        yield* Deferred.succeed(nativeCancelRequested, undefined);
+      }
       if (completeFirstPromptOnCancel) {
         yield* Deferred.succeed(nativeCancelRequested, undefined);
         yield* agent.client.sessionUpdate({
@@ -711,7 +723,47 @@ const program = Effect.gen(function* () {
         return yield* Effect.never;
       }
 
+      // Devin Cloud detaches the prompt on cancel but keeps running the tool;
+      // its completion shows up while the next prompt is being answered.
+      if (finishCancelledToolInNextPrompt && promptCount === 1) {
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "cancelled-tool",
+            title: "sleep 45 && echo slept",
+            kind: "execute",
+            status: "in_progress",
+          },
+        });
+        yield* Deferred.await(nativeCancelRequested);
+        return { stopReason: "cancelled" };
+      }
+      if (finishCancelledToolInNextPrompt && promptCount === 2) {
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "cancelled-tool",
+            status: "completed",
+            content: [{ type: "content", content: { type: "text", text: "slept" } }],
+          },
+        });
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "pong" },
+          },
+        });
+        return { stopReason: "end_turn" };
+      }
+
       if (hangPromptForever || (hangFirstPromptForever && promptCount === 1)) {
+        if (completeHangingPromptOnCancel) {
+          yield* Deferred.await(nativeCancelRequested);
+          return { stopReason: "cancelled" };
+        }
         return yield* Effect.never;
       }
 
@@ -1332,9 +1384,19 @@ const program = Effect.gen(function* () {
     return Effect.succeed({});
   });
 
-  yield* agent.handleUnknownExtNotification((method) =>
-    method === "_test/exit" ? Effect.sync(() => process.exit(19)) : Effect.void,
-  );
+  yield* agent.handleUnknownExtNotification((method) => {
+    if (method === "_test/exit") {
+      return Effect.sync(() => process.exit(19));
+    }
+    if (method === "_test/deadlock") {
+      // Block the event loop for good: no stdin, no signal handlers, only SIGKILL works.
+      return Effect.sync(() => {
+        logExit(`deadlocked:${process.pid}`);
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+      });
+    }
+    return Effect.void;
+  });
 
   return yield* Effect.never;
 }).pipe(

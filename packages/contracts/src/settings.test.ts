@@ -94,6 +94,22 @@ describe("custom model settings", () => {
     ]);
   });
 
+  it.each(["devin", "devinCloud"] as const)(
+    "round-trips structured and legacy custom models for %s",
+    (provider) => {
+      const customModels = ["bare-slug", { slug: "named", name: "Named", capabilities }];
+      const settings = decodeServerSettings({ providers: { [provider]: { customModels } } });
+      expect(encodeServerSettings(settings).providers?.[provider]?.customModels).toEqual(
+        customModels,
+      );
+      expect(
+        decodeServerSettingsPatch({ providers: { [provider]: { customModels } } }).providers?.[
+          provider
+        ]?.customModels,
+      ).toEqual(customModels);
+    },
+  );
+
   it("accepts entries at the settings patch boundary", () => {
     expect(
       decodeServerSettingsPatch({

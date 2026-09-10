@@ -1250,7 +1250,10 @@ function normalizePasskeyRpDomain(value: string): string {
 
 export function resolveMacPasskeySigningConfiguration(
   env: Readonly<Record<string, string | undefined>>,
-): MacPasskeySigningConfiguration {
+): MacPasskeySigningConfiguration | undefined {
+  if (env.T3CODE_MACOS_SELF_SIGN_IDENTITY?.trim()) {
+    return undefined;
+  }
   const teamId = env.T3CODE_APPLE_TEAM_ID?.trim().toUpperCase() ?? "";
   if (!APPLE_TEAM_ID_PATTERN.test(teamId)) {
     throw new InvalidAppleTeamIdError({ teamId });
@@ -2709,7 +2712,23 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   if (platform === "mac") {
     const path = yield* Path.Path;
     const repoRoot = yield* RepoRoot;
+    const selfSignedIdentity = signed
+      ? (yield* Config.string("T3CODE_MACOS_SELF_SIGN_IDENTITY").pipe(
+          Config.withDefault(""),
+        )).trim()
+      : "";
+    if (selfSignedIdentity) {
+      buildConfig.forceCodeSigning = true;
+    }
     buildConfig.mac = {
+      ...(selfSignedIdentity
+        ? {
+            identity: selfSignedIdentity,
+            notarize: false,
+            preAutoEntitlements: false,
+            timestamp: "none",
+          }
+        : {}),
       target: target === "dmg" ? [target, "zip"] : [target],
       icon: "icon.icns",
       category: "public.app-category.developer-tools",

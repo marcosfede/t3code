@@ -1705,6 +1705,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       T3CODE_CLERK_PASSKEY_RP_DOMAINS:
         " Clerk.Example.com,example.clerk.accounts.dev,clerk.example.com ",
     });
+    assert(configuration);
     const entitlements = renderMacPasskeyEntitlements(configuration);
 
     assert.deepStrictEqual(configuration.rpDomains, [
@@ -1798,6 +1799,68 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     assert.notInclude(error.message, secret);
   });
 
+  it("does not require Apple passkey provisioning for self-signed macOS builds", () => {
+    assert.isUndefined(
+      resolveMacPasskeySigningConfiguration({
+        T3CODE_MACOS_SELF_SIGN_IDENTITY: "fork-certificate",
+      }),
+    );
+  });
+
+  it.effect("requires a stable identity and skips notarization for self-signed macOS builds", () =>
+    Effect.gen(function* () {
+      const config = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "1.2.3",
+        true,
+        false,
+        undefined,
+        undefined,
+      );
+      const mac = config.mac as Record<string, unknown>;
+      assert.equal(mac.identity, "fork-certificate");
+      assert.isTrue(config.forceCodeSigning);
+      assert.isFalse(mac.notarize);
+      assert.isFalse(mac.preAutoEntitlements);
+      assert.equal(mac.timestamp, "none");
+      assert.isUndefined(mac.provisioningProfile);
+      assert.match(String(mac.sign), /[\\/]scripts[\\/]sign-macos\.ts$/);
+      assert.deepStrictEqual(mac.target, ["dmg", "zip"]);
+
+      const unsigned = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      assert.isUndefined((unsigned.mac as Record<string, unknown>).identity);
+      assert.isUndefined(unsigned.forceCodeSigning);
+      const linux = yield* createBuildConfig(
+        "linux",
+        "AppImage",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      assert.isUndefined(linux.mac);
+      assert.isUndefined(linux.forceCodeSigning);
+    }).pipe(
+      Effect.provide(
+        ConfigProvider.layer(
+          ConfigProvider.fromEnv({
+            env: { T3CODE_MACOS_SELF_SIGN_IDENTITY: "fork-certificate" },
+          }),
+        ),
+      ),
+    ),
+  );
+
   it.effect("adds passkey entitlements and both renderer protocols to signed macOS builds", () =>
     Effect.gen(function* () {
       const config = yield* createBuildConfig("mac", "dmg", "1.2.3", true, false, undefined, {
@@ -1809,6 +1872,9 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.equal(config.appId, "com.t3tools.t3code");
       assert.equal(mac.entitlements, "/tmp/entitlements.mac.plist");
       assert.equal(mac.provisioningProfile, "/tmp/t3code.provisionprofile");
+      assert.isUndefined(mac.identity);
+      assert.isUndefined(mac.notarize);
+      assert.isUndefined(mac.preAutoEntitlements);
       assert.match(String(mac.sign), /[\\/]scripts[\\/]sign-macos\.ts$/);
       assert.deepStrictEqual(mac.protocols, [
         { name: "T3 Code", schemes: ["t3code", "t3code-dev"] },

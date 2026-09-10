@@ -1,0 +1,241 @@
+import { describe, expect, it } from "@effect/vitest";
+import { DEVIN_CLOUD_DEFAULT_MODEL } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as EffectAcpErrors from "effect-acp/errors";
+import type * as EffectAcpSchema from "effect-acp/schema";
+
+import {
+  applyDevinAcpModelSelection,
+  buildDevinAcpSpawnInput,
+  currentDevinModelIdFromSessionSetup,
+  supportedDevinModelIdsFromSessionSetup,
+} from "./DevinAcpSupport.ts";
+
+describe("buildDevinAcpSpawnInput", () => {
+  it("launches `devin acp` with the configured binary path", () => {
+    const spawn = buildDevinAcpSpawnInput({ binaryPath: "/usr/local/bin/devin" }, "/tmp/project", {
+      HOME: "/home/dev",
+    });
+
+    expect(spawn).toEqual({
+      command: "/usr/local/bin/devin",
+      args: ["acp"],
+      cwd: "/tmp/project",
+      env: { HOME: "/home/dev" },
+      forceKillAfter: "1 second",
+    });
+  });
+
+  it("falls back to `devin` on PATH and omits env when not provided", () => {
+    const spawn = buildDevinAcpSpawnInput(null, "/tmp/project");
+
+    expect(spawn).toEqual({
+      command: "devin",
+      args: ["acp"],
+      cwd: "/tmp/project",
+      forceKillAfter: "1 second",
+    });
+  });
+});
+
+describe("currentDevinModelIdFromSessionSetup", () => {
+  it("prefers the unstable models state when present", () => {
+    const setup = {
+      sessionId: "sess-1",
+      models: {
+        availableModels: [],
+        currentModelId: " swe-1-6-fast ",
+      },
+    } as unknown as EffectAcpSchema.NewSessionResponse;
+    expect(currentDevinModelIdFromSessionSetup(setup)).toBe("swe-1-6-fast");
+  });
+
+  it("falls back to the negotiated model config option", () => {
+    const setup = {
+      sessionId: "sess-1",
+      configOptions: [
+        {
+          type: "select",
+          id: "model",
+          name: "Model",
+          category: "model",
+          currentValue: "swe-1-6-fast",
+          options: [{ name: "SWE-1.6 Fast", value: "swe-1-6-fast" }],
+        },
+      ],
+    } as unknown as EffectAcpSchema.NewSessionResponse;
+    expect(currentDevinModelIdFromSessionSetup(setup)).toBe("swe-1-6-fast");
+  });
+
+  it("returns undefined when neither surface reports a model", () => {
+    const setup = {
+      sessionId: "sess-1",
+      configOptions: [],
+    } as unknown as EffectAcpSchema.NewSessionResponse;
+    expect(currentDevinModelIdFromSessionSetup(setup)).toBeUndefined();
+  });
+});
+
+describe("supportedDevinModelIdsFromSessionSetup", () => {
+  it("collects flat and grouped model option values", () => {
+    const setup = {
+      sessionId: "sess-1",
+      configOptions: [
+        {
+          type: "select",
+          id: "model",
+          name: "Model",
+          category: "model",
+          currentValue: "swe-1-6-slow",
+          options: [
+            { name: "SWE-1.6 Slow", value: " swe-1-6-slow " },
+            { group: "Other", options: [{ name: "SWE-1.6 Fast", value: "swe-1-6-fast" }] },
+          ],
+        },
+      ],
+    } as unknown as EffectAcpSchema.NewSessionResponse;
+    expect(supportedDevinModelIdsFromSessionSetup(setup)).toEqual(
+      new Set(["swe-1-6-slow", "swe-1-6-fast"]),
+    );
+  });
+
+  it("returns undefined when the session exposes no model option", () => {
+    const setup = {
+      sessionId: "sess-1",
+      configOptions: [],
+    } as unknown as EffectAcpSchema.NewSessionResponse;
+    expect(supportedDevinModelIdsFromSessionSetup(setup)).toBeUndefined();
+  });
+});
+
+describe("applyDevinAcpModelSelection", () => {
+  const makeRecordingRuntime = (failure?: EffectAcpErrors.AcpError) => {
+    const modelCalls: Array<string> = [];
+    const configOptionCalls: Array<readonly [string, string | boolean]> = [];
+    const record = (): Effect.Effect<void, EffectAcpErrors.AcpError> =>
+      failure ? Effect.fail(failure) : Effect.void;
+    const runtime = {
+      setModel: (model: string) =>
+        Effect.suspend(() => {
+          modelCalls.push(model);
+          return record();
+        }),
+      setConfigOption: (configId: string, value: string | boolean) =>
+        Effect.suspend(() => {
+          configOptionCalls.push([configId, value] as const);
+          return record().pipe(
+            Effect.as({
+              configOptions: [],
+            } satisfies EffectAcpSchema.SetSessionConfigOptionResponse),
+          );
+        }),
+    };
+    return { runtime, modelCalls, configOptionCalls };
+  };
+
+  it.effect("sets the model config option when the requested model differs", () =>
+    Effect.gen(function* () {
+      const { runtime, modelCalls } = makeRecordingRuntime();
+      const result = yield* applyDevinAcpModelSelection({
+        runtime,
+        currentModelId: "swe-1-6-fast",
+        requestedModelId: "swe-1-6",
+        mapError: (cause) => cause.message,
+      });
+      expect(modelCalls).toEqual(["swe-1-6"]);
+      expect(result).toBe("swe-1-6");
+    }),
+  );
+
+  it.effect("skips set_config_option when requested matches current", () =>
+    Effect.gen(function* () {
+      const { runtime, modelCalls } = makeRecordingRuntime();
+      const result = yield* applyDevinAcpModelSelection({
+        runtime,
+        currentModelId: "swe-1-6-fast",
+        requestedModelId: "swe-1-6-fast",
+        mapError: (cause) => cause.message,
+      });
+      expect(modelCalls).toEqual([]);
+      expect(result).toBe("swe-1-6-fast");
+    }),
+  );
+
+  it.effect("skips set_config_option when no model is requested", () =>
+    Effect.gen(function* () {
+      const { runtime, modelCalls } = makeRecordingRuntime();
+      const result = yield* applyDevinAcpModelSelection({
+        runtime,
+        currentModelId: "swe-1-6-fast",
+        requestedModelId: undefined,
+        mapError: (cause) => cause.message,
+      });
+      expect(modelCalls).toEqual([]);
+      expect(result).toBe("swe-1-6-fast");
+    }),
+  );
+
+  it.effect("keeps the current model when the requested one is not session-accepted", () =>
+    Effect.gen(function* () {
+      const { runtime, modelCalls } = makeRecordingRuntime();
+      const result = yield* applyDevinAcpModelSelection({
+        runtime,
+        currentModelId: "swe-1-6-slow",
+        requestedModelId: "swe-1-6-fast",
+        supportedModelIds: new Set(["swe-1-6-slow"]),
+        mapError: (cause) => cause.message,
+      });
+      expect(modelCalls).toEqual([]);
+      expect(result).toBe("swe-1-6-slow");
+    }),
+  );
+
+  it.effect("switches when the requested model is session-accepted", () =>
+    Effect.gen(function* () {
+      const { runtime, modelCalls } = makeRecordingRuntime();
+      const result = yield* applyDevinAcpModelSelection({
+        runtime,
+        currentModelId: "swe-1-6-slow",
+        requestedModelId: "swe-1-6-fast",
+        supportedModelIds: new Set(["swe-1-6-slow", "swe-1-6-fast"]),
+        mapError: (cause) => cause.message,
+      });
+      expect(modelCalls).toEqual(["swe-1-6-fast"]);
+      expect(result).toBe("swe-1-6-fast");
+    }),
+  );
+
+  it.effect("keeps the negotiated model when the Cloud default placeholder is selected", () =>
+    Effect.gen(function* () {
+      const { runtime, modelCalls, configOptionCalls } = makeRecordingRuntime();
+      for (const currentModelId of [undefined, "session-model"]) {
+        const result = yield* applyDevinAcpModelSelection({
+          runtime,
+          currentModelId,
+          requestedModelId: DEVIN_CLOUD_DEFAULT_MODEL,
+          modelConfigOptionId: "devin_version",
+          mapError: (cause) => cause.message,
+        });
+        expect(result).toBe(currentModelId);
+      }
+      expect(modelCalls).toEqual([]);
+      expect(configOptionCalls).toEqual([]);
+    }),
+  );
+
+  it.effect("propagates set_config_option failures via mapError", () =>
+    Effect.gen(function* () {
+      const failure = EffectAcpErrors.AcpRequestError.invalidParams("session id not known");
+      const { runtime } = makeRecordingRuntime(failure);
+      const error = yield* Effect.flip(
+        applyDevinAcpModelSelection({
+          runtime,
+          currentModelId: "swe-1-6-fast",
+          requestedModelId: "swe-1-6",
+          mapError: (cause) => cause.message,
+        }),
+      );
+      expect(error).toBe(failure.message);
+    }),
+  );
+});
