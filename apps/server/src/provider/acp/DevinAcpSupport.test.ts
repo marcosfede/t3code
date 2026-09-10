@@ -205,6 +205,30 @@ describe("applyDevinAcpModelSelection", () => {
     }),
   );
 
+  it.effect("selects standard Cloud modes through the negotiated version option", () =>
+    Effect.gen(function* () {
+      for (const requestedModelId of [
+        "devin-2-5",
+        "devin-fast-opus",
+        "devin-ultra",
+        "devin_lite",
+        "devin-auto",
+      ]) {
+        const { runtime, modelCalls, configOptionCalls } = makeRecordingRuntime();
+        const result = yield* applyDevinAcpModelSelection({
+          runtime,
+          currentModelId: requestedModelId === "devin-2-5" ? "devin-ultra" : "devin-2-5",
+          requestedModelId,
+          modelConfigOptionId: "devin_version",
+          mapError: (cause) => cause.message,
+        });
+        expect(result).toBe(requestedModelId);
+        expect(modelCalls).toEqual([]);
+        expect(configOptionCalls).toEqual([["devin_version", requestedModelId]]);
+      }
+    }),
+  );
+
   it.effect("keeps the negotiated model when the Cloud default placeholder is selected", () =>
     Effect.gen(function* () {
       const { runtime, modelCalls, configOptionCalls } = makeRecordingRuntime();
