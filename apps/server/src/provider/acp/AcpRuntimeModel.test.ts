@@ -339,6 +339,62 @@ describe("AcpRuntimeModel", () => {
     ]);
   });
 
+  it.each([
+    {
+      name: "proposal.md",
+      uri: "https://example.com/attachments/proposal.md",
+      expected: "\n\n[proposal.md](https://example.com/attachments/proposal.md)\n\n",
+    },
+    {
+      name: "report.csv",
+      title: "Metrics report",
+      uri: "https://example.com/report%20final.csv?signature=a%2Fb&download=1#summary",
+      expected:
+        "\n\n[Metrics report](https://example.com/report%20final.csv?signature=a%2Fb&download=1#summary)\n\n",
+    },
+    {
+      name: "report [final].csv",
+      title: " ",
+      uri: "file:///workspace/report (final).csv",
+      expected: "\n\n[report \\[final\\].csv](file:///workspace/report%20%28final%29.csv)\n\n",
+    },
+    {
+      name: "**report**\n![link](other) &amp; <b>",
+      uri: "https://example.com/report.csv",
+      expected:
+        "\n\n[\\*\\*report\\*\\* \\!\\[link\\](other) \\&amp; \\<b\\>](https://example.com/report.csv)\n\n",
+    },
+  ])("preserves assistant resource links for $name", ({ expected, ...resource }) => {
+    const notification = {
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "resource_link", ...resource },
+      },
+    } satisfies EffectAcpSchema.SessionNotification;
+
+    expect(parseSessionUpdateEvent(notification).events).toEqual([
+      { _tag: "ContentDelta", text: expected, rawPayload: notification },
+    ]);
+  });
+
+  it.each(["javascript:alert(1)", "data:text/html,hello", "devin:///artifact", "not a URI"])(
+    "shows resource names without creating unsupported links for %s",
+    (uri) => {
+      const notification = {
+        sessionId: "session-1",
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "resource_link", name: "report.csv", uri },
+        },
+      } satisfies EffectAcpSchema.SessionNotification;
+
+      expect(parseSessionUpdateEvent(notification).events).toEqual([
+        { _tag: "ContentDelta", text: "\n\nreport.csv\n\n", rawPayload: notification },
+      ]);
+    },
+  );
+
   it("keeps thought chunks separate from assistant text", () => {
     const notification = {
       sessionId: "session-1",
@@ -745,6 +801,26 @@ describe("AcpRuntimeModel", () => {
           skippedSinceEmit: 3,
         }),
       ).toEqual({ emit: true, skippedSinceEmit: 0 });
+    });
+
+    it("drops updates that arrive after the tool call already finished", () => {
+      expect(
+        decideToolCallUpdateEmission({
+          previous: toolCall("same", "completed"),
+          next: toolCall("same", "completed"),
+          lastEmittedDetailLength: 4,
+          skippedSinceEmit: 0,
+        }),
+      ).toEqual({ emit: false, skippedSinceEmit: 0 });
+
+      expect(
+        decideToolCallUpdateEmission({
+          previous: toolCall("same", "failed"),
+          next: toolCall("more output", "inProgress"),
+          lastEmittedDetailLength: 4,
+          skippedSinceEmit: 0,
+        }),
+      ).toEqual({ emit: false, skippedSinceEmit: 0 });
     });
 
     it("skips updates whose bounded detail did not change", () => {

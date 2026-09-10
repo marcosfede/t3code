@@ -642,11 +642,19 @@ export function toolCallProgressLength(state: AcpToolCallState): number {
   return Math.max(state.detail?.length ?? 0, contentChars, rawOutputChars);
 }
 
+export function isTerminalToolCallStatus(status: AcpToolCallState["status"]): boolean {
+  return status === "completed" || status === "failed";
+}
+
 export function decideToolCallUpdateEmission(
   input: AcpToolCallEmitDecisionInput,
 ): AcpToolCallEmitDecision {
   const { previous, next, lastEmittedDetailLength, skippedSinceEmit } = input;
-  if (next.status === "completed" || next.status === "failed") {
+  // A tool call finishes once; anything reported after that is ignored.
+  if (isTerminalToolCallStatus(previous?.status)) {
+    return { emit: false, skippedSinceEmit: 0 };
+  }
+  if (isTerminalToolCallStatus(next.status)) {
     return { emit: true, skippedSinceEmit: 0 };
   }
   if (previous === undefined || previous.title !== next.title || previous.status !== next.status) {
@@ -784,6 +792,25 @@ function boundToolCallRawPayload(
   };
 }
 
+function assistantContentText(content: EffectAcpSchema.ContentBlock): string {
+  if (content.type === "text") return content.text;
+  if (content.type !== "resource_link") return "";
+
+  const label = (content.title?.trim() || content.name.trim() || "Attachment")
+    .replaceAll(/[\r\n]+/g, " ")
+    .replaceAll(/[\\[\]`*_<>!&]/g, "\\$&");
+  const url = URL.parse(content.uri);
+  if (!url || !["https:", "http:", "file:"].includes(url.protocol)) {
+    return `\n\n${label}\n\n`;
+  }
+  const href = content.uri
+    .trim()
+    .replaceAll(/[\s<>\\()]/g, (character) =>
+      character === "(" ? "%28" : character === ")" ? "%29" : encodeURIComponent(character),
+    );
+  return `\n\n[${label}](${href})\n\n`;
+}
+
 export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotification): {
   readonly modeId?: string;
   readonly events: ReadonlyArray<AcpParsedSessionEvent>;
@@ -860,10 +887,11 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
       break;
     }
     case "agent_message_chunk": {
-      if (upd.content.type === "text" && upd.content.text.length > 0) {
+      const text = assistantContentText(upd.content);
+      if (text.length > 0) {
         events.push({
           _tag: "ContentDelta",
-          text: upd.content.text,
+          text,
           rawPayload: params,
         });
       }
