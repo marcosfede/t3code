@@ -174,6 +174,7 @@ import {
 import { orderItemsByPreferredIds, sortLogicalProjectsForSidebar } from "./Sidebar.logic";
 import { resolveEnvironmentOptionLabel } from "./BranchToolbar.logic";
 import { CommandPaletteContent } from "./CommandPaletteContent";
+import { ImportDevinCloudSession } from "./ImportDevinCloudSession";
 import { CommandPaletteResults } from "./CommandPaletteResults";
 import { AzureDevOpsIcon, BitbucketIcon, GitHubIcon, GitLabIcon, ForgejoIcon } from "./Icons";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
@@ -869,6 +870,7 @@ function OpenCommandPaletteDialog(props: {
     null,
   );
   const [isPickingProjectFolder, setIsPickingProjectFolder] = useState(false);
+  const [isImportingDevinCloud, setIsImportingDevinCloud] = useState(false);
   const [addProjectCloneFlow, setAddProjectCloneFlow] = useState<AddProjectCloneFlow | null>(null);
   // The name step of New project: while set, the palette input is the name.
   const [newProjectFlow, setNewProjectFlow] = useState<{
@@ -1876,7 +1878,19 @@ function OpenCommandPaletteDialog(props: {
     pushPaletteView,
   ]);
 
-  const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [];
+  const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [
+    {
+      kind: "action",
+      value: "action:import-devin-cloud",
+      searchTerms: ["import", "devin", "cloud", "session", "conversation", "attach", "link"],
+      title: "Import Devin Cloud session",
+      icon: <LinkIcon className={ITEM_ICON_CLASS} />,
+      keepOpen: true,
+      run: async () => {
+        setIsImportingDevinCloud(true);
+      },
+    },
+  ];
 
   if (projects.length > 0) {
     const activeProjectTitle =
@@ -3358,6 +3372,27 @@ function OpenCommandPaletteDialog(props: {
       {`Open in ${fileManagerName}`}
     </CommandFooterAction>
   ) : null;
+
+  if (isImportingDevinCloud) {
+    const projectRef = resolveThreadActionProjectRef({
+      activeThread: activeThread ?? undefined,
+      activeDraftThread,
+      defaultProjectRef,
+      handleNewThread,
+    });
+    return (
+      <ImportDevinCloudSession
+        projects={projects}
+        initialProject={projects.find(
+          (project) =>
+            project.id === projectRef?.projectId &&
+            project.environmentId === projectRef.environmentId,
+        )}
+        onBack={() => setIsImportingDevinCloud(false)}
+        onClose={() => setOpen(false)}
+      />
+    );
+  }
 
   return (
     <CommandPaletteContent

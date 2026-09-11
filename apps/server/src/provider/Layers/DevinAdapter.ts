@@ -66,6 +66,7 @@ import {
 import { makeDevinThinkingPreview, makeDevinToolNormalizer } from "../acp/DevinActivity.ts";
 import { resolveDevinConcreteModelId } from "../acp/DevinModelCatalog.ts";
 import { makeDevinReferenceNormalizer } from "../acp/DevinReferences.ts";
+import { makeDevinCloudHistory, devinCloudSessionState } from "../acp/DevinCloudHistory.ts";
 import { type DevinAdapterShape } from "../Services/DevinAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 
@@ -208,11 +209,11 @@ export function isAcpConnectionLostError(error: EffectAcpErrors.AcpError): boole
   }
 }
 
-function parseDevinResume(raw: unknown): { sessionId: string } | undefined {
+function parseDevinResume(raw: unknown): { sessionId: string; imported: boolean } | undefined {
   if (!isRecord(raw)) return undefined;
   if (raw.schemaVersion !== DEVIN_RESUME_VERSION) return undefined;
   if (typeof raw.sessionId !== "string" || !raw.sessionId.trim()) return undefined;
-  return { sessionId: raw.sessionId.trim() };
+  return { sessionId: raw.sessionId.trim(), imported: raw.imported === true };
 }
 
 function selectPermissionOptionId(
@@ -267,6 +268,7 @@ export function makeDevinAdapter(
   return Effect.gen(function* () {
     const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("devin");
     const provider = options?.provider ?? PROVIDER;
+    const isCloud = provider === "devinCloud" || provider === "devinCloudCli";
     const makeAcpRuntime: DevinAcpRuntimeFactory =
       options?.makeAcpRuntime ??
       ((runtimeInput) => makeDevinAcpRuntime({ ...runtimeInput, devinSettings }));
@@ -598,7 +600,7 @@ export function makeDevinAdapter(
         });
       });
 
-    const startSession: DevinAdapterShape["startSession"] = (input) =>
+    const startSession: DevinAdapterShape["startSession"] = (input, hooks) =>
       withThreadLock(
         input.threadId,
         Effect.gen(function* () {
@@ -633,7 +635,21 @@ export function makeDevinAdapter(
             sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
           );
 
-          const resumeSessionId = parseDevinResume(input.resumeCursor)?.sessionId;
+          const resume = parseDevinResume(input.resumeCursor);
+          const resumeSessionId = resume?.sessionId;
+          const imported = isCloud && (hooks !== undefined || resume?.imported === true);
+          if (hooks && (!isCloud || !resumeSessionId)) {
+            return yield* new ProviderAdapterValidationError({
+              provider,
+              operation: "importSession",
+              issue: "A Devin Cloud session ID is required.",
+            });
+          }
+          let history =
+            hooks && resumeSessionId
+              ? makeDevinCloudHistory(resumeSessionId, yield* nowIso)
+              : undefined;
+          let collectingHistory = history !== undefined;
           const acpNativeLoggers = makeAcpNativeLoggers({
             nativeEventLogger,
             provider: provider,
@@ -647,6 +663,14 @@ export function makeDevinAdapter(
             cwd,
             cancelBehavior: "wait-for-prompt",
             ...(resumeSessionId ? { resumeSessionId } : {}),
+            ...(history
+              ? {
+                  onSessionUpdate: (notification: EffectAcpSchema.SessionNotification) =>
+                    Effect.sync(() => {
+                      if (collectingHistory) history?.accept(notification);
+                    }),
+                }
+              : {}),
             clientInfo: { name: "t3-code", version: "0.0.0" },
             ...(mcpSession
               ? {
@@ -757,6 +781,26 @@ export function makeDevinAdapter(
             ),
           );
 
+          collectingHistory = false;
+          if (history && hooks) {
+            if (history.overflowed()) {
+              return yield* new ProviderAdapterValidationError({
+                provider,
+                operation: "importSession",
+                issue:
+                  "This conversation exceeds the import limit (20,000 messages or 16 MiB of text).",
+              });
+            }
+            const model = currentDevinModelIdFromSessionSetup(started.sessionSetupResult);
+            const title = history.title();
+            yield* hooks.onHistory({
+              messages: history.messages(started.sessionSetupResult._meta),
+              ...(model ? { model } : {}),
+              ...(title ? { title } : {}),
+            });
+            history = undefined;
+          }
+
           const supportedModelIds = supportedDevinModelIdsFromSessionSetup(
             started.sessionSetupResult,
           );
@@ -792,6 +836,7 @@ export function makeDevinAdapter(
             resumeCursor: {
               schemaVersion: DEVIN_RESUME_VERSION,
               sessionId: started.sessionId,
+              ...(imported ? { imported: true } : {}),
             },
             createdAt: now,
             updatedAt: now,
@@ -824,14 +869,21 @@ export function makeDevinAdapter(
           };
 
           let assistantResponse:
-            | { readonly turnId: TurnId; readonly itemId: string; needsSeparator: boolean }
+            | {
+                readonly turnId: TurnId | undefined;
+                readonly itemId: string;
+                needsSeparator: boolean;
+              }
             | undefined;
           const normalizeTool = makeDevinToolNormalizer();
           const normalizeReferences = makeDevinReferenceNormalizer({
-            cloud: provider === "devinCloud" || provider === "devinCloudCli",
+            cloud: isCloud,
             sessionMetadata: started.sessionSetupResult._meta,
           });
-          const normalizedEvents = acp.getEvents().pipe(
+          const sessionReady = yield* Deferred.make<void>();
+          const normalizedEvents = Stream.unwrap(
+            Deferred.await(sessionReady).pipe(Effect.as(acp.getEvents())),
+          ).pipe(
             Stream.tap((event) =>
               event._tag === "PlanUpdated" ||
               event._tag === "ToolCallUpdated" ||
@@ -852,14 +904,30 @@ export function makeDevinAdapter(
                   return;
                 }
 
+                if (event._tag === "SessionInfoUpdated") {
+                  const state = devinCloudSessionState(event.meta);
+                  if (imported && ctx.promptsInFlight === 0 && state) {
+                    ctx.session = { ...ctx.session, status: state, updatedAt: yield* nowIso };
+                    yield* offerRuntimeEvent({
+                      type: "session.state.changed",
+                      ...(yield* makeEventStamp()),
+                      provider,
+                      threadId: ctx.threadId,
+                      payload: { state },
+                    });
+                  }
+                  return;
+                }
                 const notificationTurnId = resolveNotificationTurnId(ctx);
                 if (
-                  notificationTurnId === undefined ||
-                  ctx.interruptedTurnIds.has(notificationTurnId)
+                  (notificationTurnId === undefined && !imported) ||
+                  (notificationTurnId !== undefined &&
+                    ctx.interruptedTurnIds.has(notificationTurnId))
                 ) {
                   return;
                 }
                 if (event._tag === "ThoughtDelta") {
+                  if (notificationTurnId === undefined) return;
                   yield* publishThinking(
                     ctx,
                     ctx.thinking.append(
@@ -884,10 +952,13 @@ export function makeDevinAdapter(
                     assistantResponse = {
                       turnId: notificationTurnId,
                       itemId:
+                        notificationTurnId !== undefined &&
                         assistantResponse?.turnId === notificationTurnId
                           ? assistantResponse.itemId
                           : event.itemId,
-                      needsSeparator: assistantResponse?.turnId === notificationTurnId,
+                      needsSeparator:
+                        notificationTurnId !== undefined &&
+                        assistantResponse?.turnId === notificationTurnId,
                     };
                     yield* offerRuntimeEvent(
                       makeAcpAssistantItemEvent({
@@ -908,7 +979,7 @@ export function makeDevinAdapter(
                         threadId: ctx.threadId,
                         turnId: notificationTurnId,
                         itemId:
-                          assistantResponse?.turnId === notificationTurnId
+                          assistantResponse && assistantResponse.turnId === notificationTurnId
                             ? assistantResponse.itemId
                             : event.itemId,
                         lifecycle: "item.completed",
@@ -929,7 +1000,7 @@ export function makeDevinAdapter(
                     const toolCallId = event.toolCall.toolCallId;
                     const ownerTurnId = ctx.toolCallTurnIds.get(toolCallId) ?? notificationTurnId;
                     if (ownerTurnId !== notificationTurnId) return;
-                    ctx.toolCallTurnIds.set(toolCallId, ownerTurnId);
+                    if (ownerTurnId !== undefined) ctx.toolCallTurnIds.set(toolCallId, ownerTurnId);
                     yield* publishThinking(ctx, ctx.thinking.finish(notificationTurnId));
                     yield* offerRuntimeEvent(
                       makeAcpToolCallEvent({
@@ -945,7 +1016,7 @@ export function makeDevinAdapter(
                   }
                   case "ContentDelta": {
                     const response =
-                      assistantResponse?.turnId === notificationTurnId
+                      assistantResponse && assistantResponse.turnId === notificationTurnId
                         ? assistantResponse
                         : undefined;
                     const itemId = response?.itemId ?? event.itemId;
@@ -1036,8 +1107,22 @@ export function makeDevinAdapter(
             threadId: input.threadId,
             payload: { providerThreadId: started.sessionId },
           });
+          const importedState = imported
+            ? devinCloudSessionState(started.sessionSetupResult._meta ?? {})
+            : undefined;
+          if (importedState) {
+            ctx.session = { ...ctx.session, status: importedState };
+            yield* offerRuntimeEvent({
+              type: "session.state.changed",
+              ...(yield* makeEventStamp()),
+              provider,
+              threadId: input.threadId,
+              payload: { state: importedState },
+            });
+          }
 
-          return session;
+          yield* Deferred.succeed(sessionReady, undefined);
+          return ctx.session;
         }).pipe(Effect.scoped),
       );
 
@@ -1688,7 +1773,10 @@ export function makeDevinAdapter(
 
     return {
       provider: provider,
-      capabilities: { sessionModelSwitch: "in-session" },
+      capabilities: {
+        sessionModelSwitch: "in-session",
+        ...(isCloud ? { supportsSessionImport: true } : {}),
+      },
       startSession,
       sendTurn,
       interruptTurn,

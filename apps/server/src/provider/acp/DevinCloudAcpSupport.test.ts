@@ -29,8 +29,10 @@ import { ServerConfig } from "../../config.ts";
 import { makeDevinAdapter } from "../Layers/DevinAdapter.ts";
 import type { AcpToolCallState } from "./AcpRuntimeModel.ts";
 import { makeDevinCloudCliAcpRuntime } from "./DevinCloudCliAcpSupport.ts";
-import type { DevinAcpRuntimeFactoryInput } from "./DevinAcpSupport.ts";
+import type { DevinAcpRuntimeFactory, DevinAcpRuntimeFactoryInput } from "./DevinAcpSupport.ts";
 import { checkDevinCloudCliProviderStatus } from "../Layers/DevinCloudCliProvider.ts";
+import type { ProviderSessionHistory } from "../Services/ProviderAdapter.ts";
+import { ProviderAdapterRequestError } from "../Errors.ts";
 
 import {
   buildDevinCloudAcpWebSocketUrl,
@@ -314,14 +316,16 @@ const makeCloudTransportServer = (
           ? Queue.offer(failedLoads, undefined).pipe(Effect.asVoid)
           : Effect.void,
     };
-    const runtime = yield* (
+    const makeRuntime: DevinAcpRuntimeFactory = (input) =>
       binaryPath
-        ? makeDevinCloudCliAcpRuntime({ ...runtimeInput, settings: { binaryPath } })
+        ? makeDevinCloudCliAcpRuntime({ ...input, settings: { binaryPath } })
         : makeDevinCloudAcpRuntime({
-            ...runtimeInput,
+            ...input,
             credentials: { apiUrl: `http://127.0.0.1:${address.port}`, token: "test" },
-          })
-    ).pipe(Effect.provideService(Scope.Scope, runtimeScope));
+          });
+    const runtime = yield* makeRuntime(runtimeInput).pipe(
+      Effect.provideService(Scope.Scope, runtimeScope),
+    );
     const deltas: string[] = [];
     const receivedDelta = yield* Queue.unbounded<string>();
     const activeItems = new Set<string>();
@@ -341,6 +345,7 @@ const makeCloudTransportServer = (
     ).pipe(Effect.forkScoped);
     if (autoStart) yield* runtime.start();
     return {
+      makeRuntime,
       runtime,
       binaryPath,
       runtimeScope,
@@ -358,6 +363,145 @@ const makeCloudTransportServer = (
       toolCalls,
     };
   });
+
+describe.each(["websocket", "cli"] as const)("Devin Cloud import (%s)", (transport) => {
+  const makeCloudServer = (onLoad?: Parameters<typeof makeCloudTransportServer>[0]) =>
+    makeCloudTransportServer(onLoad, transport);
+  const provider = ProviderDriverKind.make(transport === "cli" ? "devinCloudCli" : "devinCloud");
+  it.live("imports history before publishing live activity and continues the same session", () =>
+    Effect.gen(function* () {
+      const server = yield* makeCloudServer((socket) => {
+        sendUpdate(socket, { sessionUpdate: "session_info_update", title: "Existing cloud work" });
+        sendUpdate(socket, {
+          sessionUpdate: "user_message_chunk",
+          content: { type: "text", text: "Original request" },
+          _meta: { "cognition.ai/eventId": "user-1" },
+        });
+        sendUpdate(socket, messageUpdate("history-1", "Earlier answer"));
+      });
+      const adapter = yield* makeDevinAdapter(null, {
+        provider,
+        makeAcpRuntime: server.makeRuntime,
+      });
+      const events: ProviderRuntimeEvent[] = [];
+      const received = yield* Queue.unbounded<ProviderRuntimeEvent>();
+      yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          events.push(event);
+          yield* Queue.offer(received, event);
+        }),
+      ).pipe(Effect.forkScoped);
+      const imported = yield* Deferred.make<ProviderSessionHistory>();
+      const release = yield* Deferred.make<void>();
+      const threadId = ThreadId.make("cloud-import");
+      const startup = yield* adapter
+        .startSession(
+          {
+            threadId,
+            cwd: process.cwd(),
+            runtimeMode: "approval-required",
+            resumeCursor: { schemaVersion: 1, sessionId },
+          },
+          {
+            onHistory: (history) =>
+              Deferred.succeed(imported, history).pipe(Effect.andThen(Deferred.await(release))),
+          },
+        )
+        .pipe(Effect.forkScoped);
+      const history = yield* Deferred.await(imported);
+      expect(history.title).toBe("Existing cloud work");
+      expect(history.messages.map(({ role, text }) => ({ role, text }))).toEqual([
+        { role: "user", text: "Original request" },
+        { role: "assistant", text: "Earlier answer" },
+      ]);
+      expect(events).toEqual([]);
+      const socket = yield* Queue.take(server.loads);
+      sendUpdate(socket, messageUpdate("live-1", "Work already running"));
+      sendUpdate(socket, statusUpdate("finished"));
+      yield* Deferred.succeed(release, undefined);
+      expect((yield* Fiber.join(startup)).resumeCursor).toEqual({
+        schemaVersion: 1,
+        sessionId,
+        imported: true,
+      });
+      yield* Queue.take(received).pipe(
+        Effect.repeat({ until: (event) => event.type === "item.completed" }),
+      );
+      expect(events.filter((event) => event.type === "content.delta")).toMatchObject([
+        { payload: { delta: "Work already running" } },
+      ]);
+      expect(events.filter((event) => event.type === "turn.started")).toEqual([]);
+      yield* Queue.take(received).pipe(
+        Effect.repeat({
+          until: (event) =>
+            event.type === "session.state.changed" && event.payload.state === "ready",
+        }),
+      );
+      expect((yield* adapter.listSessions())[0]?.status).toBe("ready");
+      const turn = yield* adapter.sendTurn({ threadId, input: "Continue" }).pipe(Effect.forkScoped);
+      const promptSocket = yield* Queue.take(server.prompts);
+      const prompt = server.requests.find((request) => request.method === "session/prompt")!;
+      expect(prompt.params?.sessionId).toBe(sessionId);
+      sendUpdate(promptSocket, messageUpdate("live-2", "Continuing"));
+      promptSocket.send(
+        encodeJson({ jsonrpc: "2.0", id: prompt.id, result: { stopReason: "end_turn" } }),
+      );
+      yield* Fiber.join(turn);
+      expect(server.requests.filter((request) => request.method === "session/new")).toHaveLength(1);
+      expect(server.requests.filter((request) => request.method === "session/load")).toHaveLength(
+        1,
+      );
+      yield* adapter.stopSession(threadId);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        ServerConfig.layerTest(process.cwd(), { prefix: "t3-cloud-import-test-" }).pipe(
+          Layer.provideMerge(NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  it.live("does not publish a session or prompt when saving imported history fails", () =>
+    Effect.gen(function* () {
+      const server = yield* makeCloudServer();
+      const adapter = yield* makeDevinAdapter(null, {
+        provider,
+        makeAcpRuntime: server.makeRuntime,
+      });
+      const failure = yield* adapter
+        .startSession(
+          {
+            threadId: ThreadId.make("failed-import"),
+            cwd: process.cwd(),
+            runtimeMode: "approval-required",
+            resumeCursor: { schemaVersion: 1, sessionId },
+          },
+          {
+            onHistory: () =>
+              Effect.fail(
+                new ProviderAdapterRequestError({
+                  provider: "devinCloud",
+                  method: "importSession",
+                  detail: "storage failed",
+                }),
+              ),
+          },
+        )
+        .pipe(Effect.flip);
+      expect(failure.message).toContain("storage failed");
+      expect(yield* adapter.listSessions()).toEqual([]);
+      expect(server.requests.some((request) => request.method === "session/prompt")).toBe(false);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        ServerConfig.layerTest(process.cwd(), { prefix: "t3-cloud-import-failure-test-" }).pipe(
+          Layer.provideMerge(NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+});
 
 describe.each(["websocket", "cli"] as const)("Devin Cloud reconnection (%s)", (transport) => {
   const makeCloudServer = (onLoad?: Parameters<typeof makeCloudTransportServer>[0]) =>
