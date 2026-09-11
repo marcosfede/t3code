@@ -82,6 +82,10 @@ export interface AcpPermissionRequest {
 
 export type AcpParsedSessionEvent =
   | {
+      readonly _tag: "SessionInfoUpdated";
+      readonly meta: Readonly<Record<string, unknown>>;
+    }
+  | {
       readonly _tag: "ModeChanged";
       readonly modeId: string;
     }
@@ -792,7 +796,7 @@ function boundToolCallRawPayload(
   };
 }
 
-function assistantContentText(content: EffectAcpSchema.ContentBlock): string {
+export function assistantContentText(content: EffectAcpSchema.ContentBlock): string {
   if (content.type === "text") return content.text;
   if (content.type !== "resource_link") return "";
 
@@ -820,6 +824,10 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
   let modeId: string | undefined;
 
   switch (upd.sessionUpdate) {
+    case "session_info_update": {
+      events.push({ _tag: "SessionInfoUpdated", meta: upd._meta ?? {} });
+      break;
+    }
     case "config_option_update": {
       events.push({
         _tag: "ConfigOptionsUpdated",

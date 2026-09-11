@@ -5359,6 +5359,24 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("keeps Devin Cloud import failures structured over websocket rpc", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const error = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.agentSessionsImportDevinCloud]({
+            projectId: ProjectId.make("cloud-import-project"),
+            session: "https://example.com/not-devin",
+          }).pipe(Effect.flip),
+        ),
+      );
+      assert.equal(error._tag, "DevinCloudSessionImportError");
+      if (error._tag === "DevinCloudSessionImportError")
+        assert.match(error.detail, /Paste a Devin/);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("keeps agent session import project failures structured over websocket rpc", () =>
     Effect.gen(function* () {
       yield* buildAppUnderTest();

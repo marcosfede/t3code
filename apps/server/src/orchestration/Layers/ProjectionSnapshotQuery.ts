@@ -78,6 +78,11 @@ import {
   type ProjectionSnapshotQueryShape,
 } from "../Services/ProjectionSnapshotQuery.ts";
 
+const ThreadLifecycleSchema = Schema.Struct({
+  projectId: ProjectId,
+  archivedAt: Schema.NullOr(IsoDateTime),
+  deletedAt: Schema.NullOr(IsoDateTime),
+});
 const decodeReadModel = Schema.decodeUnknownEffect(OrchestrationReadModel);
 const decodeShellSnapshot = Schema.decodeUnknownEffect(OrchestrationShellSnapshot);
 const decodeThread = Schema.decodeUnknownEffect(OrchestrationThread);
@@ -1180,6 +1185,26 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         LIMIT 1
       `,
   });
+
+  const getThreadLifecycleRow = SqlSchema.findOneOption({
+    Request: ThreadIdLookupInput,
+    Result: ThreadLifecycleSchema,
+    execute: ({ threadId }) => sql`
+      SELECT project_id AS "projectId", archived_at AS "archivedAt", deleted_at AS "deletedAt"
+      FROM projection_threads WHERE thread_id = ${threadId}
+    `,
+  });
+  const getThreadLifecycleById: ProjectionSnapshotQueryShape["getThreadLifecycleById"] = (
+    threadId,
+  ) =>
+    getThreadLifecycleRow({ threadId }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getThreadLifecycleById:query",
+          "ProjectionSnapshotQuery.getThreadLifecycleById:decode",
+        ),
+      ),
+    );
 
   const getActiveThreadRowById = SqlSchema.findOneOption({
     Request: ThreadIdLookupInput,
@@ -3649,6 +3674,7 @@ pending_approval_requests AS (
     getThreadCheckpointContext,
     getFullThreadDiffContext,
     getThreadShellById,
+    getThreadLifecycleById,
     getThreadRuntimeContext,
     getTurnStartMessage,
     getThreadDetailById,

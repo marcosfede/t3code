@@ -46,7 +46,7 @@ function stopReason(meta: unknown): AcpSchema.StopReason | undefined {
 }
 
 export const makeDevinCloudReconnect = Effect.fn("makeDevinCloudReconnect")(function* (
-  options: Pick<AcpSessionRuntimeOptions, "resumeSessionId" | "requestLogger">,
+  options: Pick<AcpSessionRuntimeOptions, "resumeSessionId" | "requestLogger" | "onSessionUpdate">,
   connect: (
     options: Pick<
       AcpSessionRuntimeOptions,
@@ -127,6 +127,7 @@ export const makeDevinCloudReconnect = Effect.fn("makeDevinCloudReconnect")(func
           : {}),
         onSessionUpdate: (notification) =>
           Effect.gen(function* () {
+            if (options.onSessionUpdate) yield* options.onSessionUpdate(notification);
             if (notification.sessionId !== sessionId) return;
             const id = eventId(notification);
             if (id !== undefined) delivered.add(id);

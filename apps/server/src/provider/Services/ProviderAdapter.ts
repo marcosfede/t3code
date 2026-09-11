@@ -50,6 +50,7 @@ export interface ProviderAdapterCapabilities {
   /** Starts a resumed turn with no synthetic user prompt. Omitted means the
       adapter needs an explicit continuation instruction. */
   readonly promptlessTurnContinuation?: boolean;
+  readonly supportsSessionImport?: boolean;
   /** False when native conversation history cannot be rewound. */
   readonly supportsConversationRollback?: boolean;
 }
@@ -64,6 +65,20 @@ export interface ProviderThreadSnapshot {
   readonly turns: ReadonlyArray<ProviderThreadTurnSnapshot>;
 }
 
+export interface ProviderSessionHistory {
+  readonly title?: string;
+  readonly model?: string;
+  readonly messages: ReadonlyArray<{
+    readonly role: "user" | "assistant";
+    readonly text: string;
+    readonly createdAt: string;
+  }>;
+}
+
+export interface ProviderSessionStartHooks<TError> {
+  readonly onHistory: (history: ProviderSessionHistory) => Effect.Effect<void, TError>;
+}
+
 export interface ProviderAdapterShape<TError> {
   /**
    * Provider kind implemented by this adapter.
@@ -76,6 +91,7 @@ export interface ProviderAdapterShape<TError> {
    */
   readonly startSession: (
     input: ProviderSessionStartInput,
+    hooks?: ProviderSessionStartHooks<TError>,
   ) => Effect.Effect<ProviderSession, TError>;
 
   /**

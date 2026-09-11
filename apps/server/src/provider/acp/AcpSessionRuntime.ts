@@ -1236,6 +1236,12 @@ const handleSessionUpdate = ({
       );
     }
     for (const event of parsed.events) {
+      if (
+        event._tag === "SessionInfoUpdated" &&
+        ["finished", "blocked", "crashed"].includes(String(event.meta["cognition.ai/statusEnum"]))
+      ) {
+        yield* closeActiveAssistantSegment({ queue, assistantSegmentRef });
+      }
       if (event._tag === "ToolCallUpdated") {
         yield* closeActiveAssistantSegment({
           queue,
