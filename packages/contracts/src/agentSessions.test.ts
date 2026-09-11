@@ -1,7 +1,29 @@
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
-import { AgentSessionScanResult } from "./agentSessions.ts";
+import { AgentSessionScanResult, parseDevinCloudSessionId } from "./agentSessions.ts";
+
+describe("parseDevinCloudSessionId", () => {
+  it("accepts session IDs and Devin links without forwarding query parameters", () => {
+    expect(parseDevinCloudSessionId(" devin-abc123 ")).toBe("devin-abc123");
+    expect(parseDevinCloudSessionId("https://app.devin.ai/sessions/abc123?ts=123#chat")).toBe(
+      "abc123",
+    );
+    expect(parseDevinCloudSessionId("https://staging.devin.ai/sessions/abc123/")).toBe("abc123");
+  });
+  it.each([
+    "",
+    "hello world",
+    "https://example.com/sessions/abc",
+    "https://devin.ai.evil.com/sessions/abc",
+    "https://user:secret@app.devin.ai/sessions/abc",
+    "https://app.devin.ai/settings",
+    "https://app.devin.ai/sessions/abc/extra",
+    "a".repeat(201),
+  ])("rejects invalid input: %s", (input) => {
+    expect(parseDevinCloudSessionId(input)).toBeUndefined();
+  });
+});
 
 const decodeScanResult = Schema.decodeUnknownSync(AgentSessionScanResult);
 

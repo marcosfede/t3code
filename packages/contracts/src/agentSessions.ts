@@ -1,5 +1,11 @@
 import * as Schema from "effect/Schema";
-import { IsoDateTime, NonNegativeInt, ProjectId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  IsoDateTime,
+  NonNegativeInt,
+  ProjectId,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
 /** Coding agent home directories the scanner knows how to read. */
@@ -72,6 +78,40 @@ export const AgentSessionScanResult = Schema.Struct({
   truncated: Schema.optional(Schema.Boolean),
 });
 export type AgentSessionScanResult = typeof AgentSessionScanResult.Type;
+
+export function parseDevinCloudSessionId(value: string): string | undefined {
+  const input = value.trim();
+  if (/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,199}$/.test(input)) return input;
+  const url = URL.parse(input);
+  if (
+    !url ||
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    !(url.hostname === "devin.ai" || url.hostname.endsWith(".devin.ai"))
+  )
+    return undefined;
+  const match = /^\/sessions\/([a-zA-Z0-9][a-zA-Z0-9_-]{0,199})\/?$/.exec(url.pathname);
+  return match?.[1];
+}
+
+export const DevinCloudSessionImportInput = Schema.Struct({
+  projectId: ProjectId,
+  session: TrimmedNonEmptyString.check(Schema.isMaxLength(2048)),
+  providerInstanceId: Schema.optional(ProviderInstanceId),
+});
+export type DevinCloudSessionImportInput = typeof DevinCloudSessionImportInput.Type;
+
+export const DevinCloudSessionImportResult = Schema.Struct({ threadId: ThreadId });
+
+export class DevinCloudSessionImportError extends Schema.TaggedError<DevinCloudSessionImportError>()(
+  "DevinCloudSessionImportError",
+  { detail: Schema.String },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
 
 export const AgentSessionImportInput = Schema.Struct({
   projectId: ProjectId,
