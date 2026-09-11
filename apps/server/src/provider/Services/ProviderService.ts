@@ -31,8 +31,8 @@ import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 
-import type { ProviderServiceError } from "../Errors.ts";
-import type { ProviderAdapterCapabilities } from "./ProviderAdapter.ts";
+import type { ProviderAdapterError, ProviderServiceError } from "../Errors.ts";
+import type { ProviderAdapterCapabilities, ProviderSessionStartHooks } from "./ProviderAdapter.ts";
 import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
 
 /**
@@ -45,6 +45,7 @@ export interface ProviderServiceShape {
   readonly startSession: (
     threadId: ThreadId,
     input: ProviderSessionStartInput,
+    hooks?: ProviderSessionStartHooks<ProviderAdapterError>,
   ) => Effect.Effect<ProviderSession, ProviderServiceError>;
 
   /**
