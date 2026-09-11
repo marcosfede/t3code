@@ -41,6 +41,9 @@ import {
 } from "./filesystem.ts";
 import {
   AgentSessionImportInput,
+  DevinCloudSessionImportInput,
+  DevinCloudSessionImportResult,
+  DevinCloudSessionImportError,
   AgentSessionImportProjectChangedError,
   AgentSessionImportProjectNotFoundError,
   AgentSessionImportResult,
@@ -306,6 +309,7 @@ export const WS_METHODS = {
   filesystemBrowse: "filesystem.browse",
   agentSessionsScan: "agentSessions.scan",
   agentSessionsImport: "agentSessions.import",
+  agentSessionsImportDevinCloud: "agentSessions.importDevinCloud",
   assetsCreateUrl: "assets.createUrl",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
   attachmentsDelete: "attachments.delete",
@@ -1030,6 +1034,12 @@ const WsAgentSessionsScanRpc = Rpc.make(WS_METHODS.agentSessionsScan, {
   error: Schema.Union([AgentSessionScanError, EnvironmentAuthorizationError]),
 });
 
+const WsDevinCloudSessionImportRpc = Rpc.make(WS_METHODS.agentSessionsImportDevinCloud, {
+  payload: DevinCloudSessionImportInput,
+  success: DevinCloudSessionImportResult,
+  error: Schema.Union([DevinCloudSessionImportError, EnvironmentAuthorizationError]),
+});
+
 const WsAgentSessionsImportRpc = Rpc.make(WS_METHODS.agentSessionsImport, {
   payload: AgentSessionImportInput,
   success: AgentSessionImportResult,
@@ -1537,6 +1547,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsFilesystemBrowseRpc,
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
+  WsDevinCloudSessionImportRpc,
   WsAssetsCreateUrlRpc,
   WsAttachmentsCreateUploadUrlRpc,
   WsAttachmentsDeleteRpc,
