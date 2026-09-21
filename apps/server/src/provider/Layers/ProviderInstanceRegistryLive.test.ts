@@ -462,7 +462,7 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
     Layer.provideMerge(CodexResetCredit.layerTest),
   );
 
-  it.live("keeps direct and CLI-backed Devin Cloud instances independent", () =>
+  it.live("keeps existing Devin Cloud provider identities independent", () =>
     Effect.gen(function* () {
       const directId = ProviderInstanceId.make("cloud-direct");
       const cliId = ProviderInstanceId.make("cloud-cli");
@@ -485,7 +485,7 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       expect(yield* direct!.snapshot.getSnapshot).toMatchObject({
         instanceId: directId,
         driver: "devinCloud",
-        displayName: "Devin Cloud (Websockets)",
+        displayName: "Devin Cloud",
         status: "disabled",
       });
       expect(yield* cli!.snapshot.getSnapshot).toMatchObject({

@@ -12,8 +12,8 @@ import * as Equal from "effect/Equal";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as Exit from "effect/Exit";
-import * as FileSystem from "effect/FileSystem";
-import * as Layer from "effect/Layer";
+import * as Crypto from "effect/Crypto";
+import { ChildProcessSpawner } from "effect/unstable/process";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
@@ -21,10 +21,13 @@ import * as Schema from "effect/Schema";
 import * as AcpSchema from "effect-acp/schema";
 import { HttpClient } from "effect/unstable/http";
 import { createModelCapabilities } from "@t3tools/shared/model";
-import * as EffectAcpClient from "effect-acp/client";
+import { parseDevinAuthStatus, runDevinCliCommand } from "./DevinProvider.ts";
 
 import {
   buildServerProvider,
+  isCommandMissingCause,
+  parseGenericCliVersion,
+  type ProviderProbeResult,
   providerModelsFromSettings,
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
@@ -32,10 +35,9 @@ import {
   enrichProviderSnapshotWithVersionAdvisory,
   type ProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
-import { connectAcpWebSocketStdio } from "../acp/AcpWebSocketStdio.ts";
 import {
-  buildDevinCloudAcpWebSocketUrl,
-  loadDevinCloudCredentials,
+  DEVIN_CLOUD_CREDENTIALS_MIGRATION_MESSAGE,
+  makeDevinCloudAcpRuntime,
 } from "../acp/DevinCloudAcpSupport.ts";
 import { isConnectionLost } from "../acp/DevinCloudReconnect.ts";
 import { findDevinModelConfigOption } from "../acp/DevinAcpSupport.ts";
@@ -44,7 +46,7 @@ import type { ServerProviderShape } from "../Services/ServerProvider.ts";
 import { buildDevinDiscoveredModelsFromSessionSetup } from "./DevinProvider.ts";
 
 const DEVIN_CLOUD_PRESENTATION = {
-  displayName: "Devin Cloud (Websockets)",
+  displayName: "Devin Cloud",
   badgeLabel: "Early Access",
   showInteractionModeToggle: false,
   requiresNewThreadForModelChange: false,
@@ -205,21 +207,16 @@ export function buildInitialDevinCloudProviderSnapshot(
  * `session/new`, which would create a real cloud session per probe. A verdict
  * stands until the next health refresh, so a dropped handshake is retried
  * rather than reported as an outage while live sessions reconnect fine. */
-const probeDevinCloudAcp = (webSocketUrl: string) =>
+const probeDevinCloudAcp = (cloudSettings: DevinCloudSettings, environment: NodeJS.ProcessEnv) =>
   Effect.gen(function* () {
-    const stdioHandle = yield* connectAcpWebSocketStdio(webSocketUrl);
-    const acpContext = yield* Layer.build(
-      Layer.effect(
-        EffectAcpClient.AcpClient,
-        EffectAcpClient.make(stdioHandle.stdio, {}, stdioHandle.terminationError),
-      ),
-    );
-    const acp = yield* Effect.service(EffectAcpClient.AcpClient).pipe(Effect.provide(acpContext));
-    return yield* acp.agent.initialize({
-      protocolVersion: 1,
-      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
+    const acp = yield* makeDevinCloudAcpRuntime({
+      cloudSettings,
+      environment,
+      childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
+      cwd: process.cwd(),
       clientInfo: { name: "t3-code-provider-probe", version: "0.0.0" },
     });
+    return yield* acp.initialize();
   }).pipe(
     Effect.scoped,
     Effect.retry({ times: 2, schedule: Schedule.spaced("1 second"), while: isConnectionLost }),
@@ -228,97 +225,118 @@ const probeDevinCloudAcp = (webSocketUrl: string) =>
 export const checkDevinCloudProviderStatus = Effect.fn("checkDevinCloudProviderStatus")(function* (
   cloudSettings: DevinCloudSettings,
   environment: NodeJS.ProcessEnv = process.env,
-): Effect.fn.Return<ServerProviderDraft, never, FileSystem.FileSystem> {
+): Effect.fn.Return<
+  ServerProviderDraft,
+  never,
+  ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto
+> {
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const models = devinCloudModels(cloudSettings.customModels);
 
-  if (!cloudSettings.enabled) {
-    return buildServerProvider({
-      presentation: DEVIN_CLOUD_PRESENTATION,
-      enabled: false,
-      checkedAt,
-      models,
-      probe: {
-        installed: false,
-        version: null,
-        status: "warning",
-        auth: { status: "unknown" },
-        message: "Devin Cloud is disabled in T3 Code settings.",
-      },
-    });
-  }
-
-  const credentialsResult = yield* loadDevinCloudCredentials(cloudSettings, environment).pipe(
-    Effect.result,
-  );
-  if (Result.isFailure(credentialsResult)) {
-    const message = credentialsResult.failure.message;
-    return buildServerProvider({
+  const snapshot = (probe: ProviderProbeResult) =>
+    buildServerProvider({
       presentation: DEVIN_CLOUD_PRESENTATION,
       enabled: cloudSettings.enabled,
       checkedAt,
       models,
-      probe: {
-        installed: true,
-        version: null,
-        status: "warning",
-        auth: { status: "unauthenticated" },
-        message,
-      },
+      probe,
+    });
+  if (!cloudSettings.enabled) {
+    return snapshot({
+      installed: false,
+      version: null,
+      status: "warning",
+      auth: { status: "unknown" },
+      message: "Devin Cloud is disabled in T3 Code settings.",
+    });
+  }
+  if (cloudSettings.credentialsPath?.trim()) {
+    return snapshot({
+      installed: true,
+      version: null,
+      status: "warning",
+      auth: { status: "unknown" },
+      message: DEVIN_CLOUD_CREDENTIALS_MIGRATION_MESSAGE,
+    });
+  }
+  const versionResult = yield* runDevinCliCommand(cloudSettings, ["--version"], environment).pipe(
+    Effect.timeoutOption(4_000),
+    Effect.result,
+  );
+  if (Result.isFailure(versionResult)) {
+    return snapshot({
+      installed: !isCommandMissingCause(versionResult.failure),
+      version: null,
+      status: "error",
+      auth: { status: "unknown" },
+      message:
+        "Could not execute the Devin CLI. Install a version supporting `acp --cloud` and check the configured Binary path.",
+    });
+  }
+  if (Option.isNone(versionResult.success) || versionResult.success.value.code !== 0) {
+    return snapshot({
+      installed: true,
+      version: null,
+      status: "error",
+      auth: { status: "unknown" },
+      message: "The Devin CLI failed or timed out while running `--version`.",
+    });
+  }
+  const versionOutput = versionResult.success.value;
+  const version = parseGenericCliVersion(`${versionOutput.stdout}\n${versionOutput.stderr}`);
+  const authResult = yield* runDevinCliCommand(cloudSettings, ["auth", "status"], environment).pipe(
+    Effect.timeoutOption(4_000),
+    Effect.result,
+  );
+  const auth =
+    Result.isSuccess(authResult) && Option.isSome(authResult.success)
+      ? parseDevinAuthStatus(
+          `${authResult.success.value.stdout}\n${authResult.success.value.stderr}`,
+        )
+      : { status: "unknown" as const };
+  if (auth.status === "unauthenticated") {
+    return snapshot({
+      installed: true,
+      version,
+      status: "warning",
+      auth,
+      message: "Sign in with a Devin account using the configured binary's `auth login` command.",
     });
   }
 
-  const probeExit = yield* probeDevinCloudAcp(
-    buildDevinCloudAcpWebSocketUrl(credentialsResult.success),
-  ).pipe(Effect.timeoutOption(DEVIN_CLOUD_ACP_PROBE_TIMEOUT_MS), Effect.exit);
+  const probeExit = yield* probeDevinCloudAcp(cloudSettings, environment).pipe(
+    Effect.timeoutOption(DEVIN_CLOUD_ACP_PROBE_TIMEOUT_MS),
+    Effect.exit,
+  );
 
   if (Exit.isFailure(probeExit)) {
     yield* Effect.logWarning("Devin Cloud ACP probe failed", {
       errorTag: causeErrorTag(probeExit.cause),
     });
-    return buildServerProvider({
-      presentation: DEVIN_CLOUD_PRESENTATION,
-      enabled: cloudSettings.enabled,
-      checkedAt,
-      models,
-      probe: {
-        installed: true,
-        version: null,
-        status: "error",
-        auth: { status: "unknown" },
-        message:
-          "Could not reach the Devin Cloud ACP endpoint. Check network access and `devin auth login`.",
-      },
+    return snapshot({
+      installed: true,
+      version,
+      status: "error",
+      auth: { status: "unknown" },
+      message:
+        "Could not initialize `acp --cloud`. Update the configured Devin CLI, sign in with a Devin account using `auth login`, and check network access.",
     });
   }
   if (Option.isNone(probeExit.value)) {
-    return buildServerProvider({
-      presentation: DEVIN_CLOUD_PRESENTATION,
-      enabled: cloudSettings.enabled,
-      checkedAt,
-      models,
-      probe: {
-        installed: true,
-        version: null,
-        status: "error",
-        auth: { status: "unknown" },
-        message: `Devin Cloud ACP probe timed out after ${DEVIN_CLOUD_ACP_PROBE_TIMEOUT_MS}ms.`,
-      },
+    return snapshot({
+      installed: true,
+      version,
+      status: "error",
+      auth: { status: "unknown" },
+      message: `Devin Cloud ACP probe timed out after ${DEVIN_CLOUD_ACP_PROBE_TIMEOUT_MS}ms.`,
     });
   }
 
-  const agentVersion = probeExit.value.value.agentInfo?.version?.trim() || null;
-  return buildServerProvider({
-    presentation: DEVIN_CLOUD_PRESENTATION,
-    enabled: cloudSettings.enabled,
-    checkedAt,
-    models,
-    probe: {
-      installed: true,
-      version: agentVersion,
-      status: "ready",
-      auth: { status: "authenticated" },
-    },
+  return snapshot({
+    installed: true,
+    version,
+    status: "ready",
+    auth: { status: "authenticated" },
   });
 });
 

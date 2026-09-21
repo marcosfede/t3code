@@ -83,7 +83,7 @@ const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = [
   },
   {
     value: ProviderDriverKind.make("devinCloud"),
-    label: "Devin Cloud (Websockets)",
+    label: "Devin Cloud",
     icon: DevinIcon,
     badgeLabel: "Early Access",
     settingsSchema: DevinCloudSettings,

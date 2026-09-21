@@ -40,7 +40,6 @@ import {
   type AcpSessionModeState,
   type AcpToolCallState,
 } from "./AcpRuntimeModel.ts";
-import { connectAcpWebSocketStdio } from "./AcpWebSocketStdio.ts";
 
 interface AcpToolCallTrackedState {
   readonly state: AcpToolCallState;
@@ -86,17 +85,8 @@ export interface AcpSpawnInput {
   readonly forceKillAfter?: Duration.Input;
 }
 
-export interface AcpWebSocketInput {
-  readonly url: string;
-}
-
 export interface AcpSessionRuntimeOptions {
-  /** Child-process transport: spawns the agent CLI and speaks ACP over stdio.
-   * Exactly one of `spawn` or `webSocket` must be provided. */
-  readonly spawn?: AcpSpawnInput;
-  /** WebSocket transport: connects to a remote ACP endpoint carrying NDJSON
-   * JSON-RPC frames. Exactly one of `spawn` or `webSocket` must be provided. */
-  readonly webSocket?: AcpWebSocketInput;
+  readonly spawn: AcpSpawnInput;
   readonly cwd: string;
   readonly acceptSessionUpdate?: (notification: EffectAcpSchema.SessionNotification) => boolean;
   readonly onSessionUpdate?: (
@@ -506,80 +496,55 @@ export const make = (
 
     const transport = yield* Effect.gen(function* () {
       const spawn = options.spawn;
-      if (spawn !== undefined) {
-        const spawnCommand = yield* resolveSpawnCommand(spawn.command, spawn.args, {
-          ...(spawn.env ? { env: spawn.env } : {}),
-          extendEnv: spawn.extendEnv ?? true,
-        });
-        const child = yield* spawner
-          .spawn(
-            ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-              ...(spawn.cwd ? { cwd: spawn.cwd } : {}),
-              ...(spawn.env ? { env: spawn.env } : {}),
-              extendEnv: spawn.extendEnv ?? true,
-              ...(spawn.forceKillAfter !== undefined
-                ? { forceKillAfter: spawn.forceKillAfter }
-                : {}),
-              shell: spawnCommand.shell,
-            }),
-          )
-          .pipe(
-            Effect.provideService(Scope.Scope, runtimeScope),
-            Effect.mapError(
-              (cause) =>
-                new EffectAcpErrors.AcpSpawnError({
-                  command: spawn.command,
-                  cause,
-                }),
-            ),
-          );
-
-        yield* child.stderr.pipe(
-          Stream.decodeText(),
-          Stream.runForEach((chunk) =>
-            Ref.update(stderrTailRef, (current) => appendAcpStderrTail(current, chunk)).pipe(
-              Effect.andThen(
-                options.onStderr
-                  ? options.onStderr(chunk.slice(-maxStderrChunkLength))
-                  : Effect.void,
-              ),
-              Effect.catch((error) =>
-                Effect.gen(function* () {
-                  yield* Deferred.fail(stderrFailure, error);
-                  yield* recordTermination(error);
-                  yield* child.kill({ forceKillAfter: "1 second" }).pipe(Effect.ignore);
-                }),
-              ),
-            ),
+      const spawnCommand = yield* resolveSpawnCommand(spawn.command, spawn.args, {
+        ...(spawn.env ? { env: spawn.env } : {}),
+        extendEnv: spawn.extendEnv ?? true,
+      });
+      const child = yield* spawner
+        .spawn(
+          ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+            ...(spawn.cwd ? { cwd: spawn.cwd } : {}),
+            ...(spawn.env ? { env: spawn.env } : {}),
+            extendEnv: spawn.extendEnv ?? true,
+            ...(spawn.forceKillAfter !== undefined ? { forceKillAfter: spawn.forceKillAfter } : {}),
+            shell: spawnCommand.shell,
+          }),
+        )
+        .pipe(
+          Effect.provideService(Scope.Scope, runtimeScope),
+          Effect.mapError(
+            (cause) =>
+              new EffectAcpErrors.AcpSpawnError({
+                command: spawn.command,
+                cause,
+              }),
           ),
-          Effect.ensuring(Deferred.succeed(stderrDrained, undefined)),
-          Effect.ignore,
-          Effect.forkIn(runtimeScope),
         );
 
-        return {
-          layer: EffectAcpClient.layerChildProcess(child, acpClientOptions),
-          terminate: child.kill({ forceKillAfter: "1 second" }).pipe(Effect.ignore),
-        };
-      }
-      if (options.webSocket === undefined) {
-        return yield* Effect.die(
-          new Error("AcpSessionRuntime requires exactly one of `spawn` or `webSocket`"),
-        );
-      }
-      const webSocketStdio = yield* connectAcpWebSocketStdio(options.webSocket.url).pipe(
-        Effect.provideService(Scope.Scope, runtimeScope),
-      );
-      return {
-        layer: Layer.effect(
-          EffectAcpClient.AcpClient,
-          EffectAcpClient.make(
-            webSocketStdio.stdio,
-            acpClientOptions,
-            webSocketStdio.terminationError,
+      yield* child.stderr.pipe(
+        Stream.decodeText(),
+        Stream.runForEach((chunk) =>
+          Ref.update(stderrTailRef, (current) => appendAcpStderrTail(current, chunk)).pipe(
+            Effect.andThen(
+              options.onStderr ? options.onStderr(chunk.slice(-maxStderrChunkLength)) : Effect.void,
+            ),
+            Effect.catch((error) =>
+              Effect.gen(function* () {
+                yield* Deferred.fail(stderrFailure, error);
+                yield* recordTermination(error);
+                yield* child.kill({ forceKillAfter: "1 second" }).pipe(Effect.ignore);
+              }),
+            ),
           ),
         ),
-        terminate: webSocketStdio.close,
+        Effect.ensuring(Deferred.succeed(stderrDrained, undefined)),
+        Effect.ignore,
+        Effect.forkIn(runtimeScope),
+      );
+
+      return {
+        layer: EffectAcpClient.layerChildProcess(child, acpClientOptions),
+        terminate: child.kill({ forceKillAfter: "1 second" }).pipe(Effect.ignore),
       };
     });
 

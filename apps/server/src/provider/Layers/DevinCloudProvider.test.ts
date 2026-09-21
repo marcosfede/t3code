@@ -1,3 +1,4 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import {
   DEVIN_CLOUD_DEFAULT_MODEL,
@@ -7,15 +8,19 @@ import {
   ProviderInstanceId,
   type ServerProvider,
 } from "@t3tools/contracts";
-import * as Stream from "effect/Stream";
 import * as Option from "effect/Option";
 import type { ServerProviderShape } from "../Services/ServerProvider.ts";
+import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
+import { checkDevinCloudCliProviderStatus } from "./DevinCloudCliProvider.ts";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
 import * as PlatformError from "effect/PlatformError";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
-import { WebSocketServer } from "ws";
 import { normalizeModelSlug } from "@t3tools/shared/model";
+import * as Sink from "effect/Sink";
+import * as Stream from "effect/Stream";
+import { ChildProcessSpawner } from "effect/unstable/process";
 
 import {
   buildInitialDevinCloudProviderSnapshot,
@@ -24,73 +29,112 @@ import {
 } from "./DevinCloudProvider.ts";
 
 const decodeSettings = Schema.decodeSync(DevinCloudSettings);
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const decodeRequest = Schema.decodeUnknownSync(
+  Schema.fromJsonString(
+    Schema.Struct({
+      id: Schema.Union([Schema.Number, Schema.String]),
+      method: Schema.String,
+    }),
+  ),
+);
 
-const fileSystemWith = (files: Record<string, string>) =>
-  FileSystem.layerNoop({
-    readFileString: (path) =>
-      path in files
-        ? Effect.succeed(files[path]!)
-        : Effect.fail(
-            PlatformError.systemError({
-              _tag: "NotFound",
-              module: "FileSystem",
-              method: "readFileString",
-              description: "no such file",
-              pathOrDescriptor: path,
-            }),
+const makeCli = (
+  options: {
+    refuse?: number;
+    authenticated?: boolean;
+    missing?: boolean;
+    versionCode?: number;
+  } = {},
+) => {
+  const calls: Array<{ command: string; args: ReadonlyArray<string>; env: unknown }> = [];
+  const requests: string[] = [];
+  let connections = 0;
+  const spawner = ChildProcessSpawner.make((command) =>
+    Effect.gen(function* () {
+      if (command._tag !== "StandardCommand") return yield* Effect.die("Unexpected pipeline");
+      calls.push({ command: command.command, args: command.args, env: command.options.env });
+      if (options.missing)
+        return yield* PlatformError.systemError({
+          _tag: "NotFound",
+          module: "ChildProcess",
+          method: "spawn",
+          description: "missing CLI",
+        });
+      const acp = command.args[0] === "acp";
+      const output = yield* Queue.unbounded<Uint8Array, Cause.Done>();
+      const exited = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+      const terminate = (code = 0) => {
+        Deferred.doneUnsafe(exited, Effect.succeed(ChildProcessSpawner.ExitCode(code)));
+        Queue.endUnsafe(output);
+      };
+      yield* Effect.addFinalizer(() => Effect.sync(terminate));
+      if (!acp) {
+        const version = command.args[0] === "--version";
+        Queue.offerUnsafe(
+          output,
+          new TextEncoder().encode(
+            version
+              ? "devin 3000.11.1 (test)\n"
+              : options.authenticated === false
+                ? "Not logged in.\n"
+                : "Logged in as test@example.com\n",
           ),
-  });
-
-const emptyFileSystem = fileSystemWith({});
-
-/** ACP relay stand-in that drops the first `refuse` handshakes, then answers `initialize`. */
-const makeRelay = (refuse: number) =>
-  Effect.gen(function* () {
-    const server = yield* Effect.acquireRelease(
-      Effect.sync(() => new WebSocketServer({ host: "127.0.0.1", port: 0 })),
-      (server) =>
-        Effect.callback<void>((resume) => {
-          for (const socket of server.clients) socket.terminate();
-          server.close(() => resume(Effect.void));
-        }),
-    );
-    let connections = 0;
-    const methods: string[] = [];
-    server.on("connection", (socket) => {
-      if (connections++ < refuse) {
-        socket.terminate();
-        return;
-      }
-      socket.on("message", (data) => {
-        const request = JSON.parse(String(data)) as { id?: number; method?: string };
-        if (request.method) methods.push(request.method);
-        if (request.method !== "initialize") return;
-        socket.send(
-          `${JSON.stringify({
-            jsonrpc: "2.0",
-            id: request.id,
-            result: {
-              protocolVersion: 1,
-              agentCapabilities: {},
-              authMethods: [],
-              agentInfo: { name: "devin", version: "relay-test" },
-            },
-          })}\n`,
         );
+        terminate(version ? (options.versionCode ?? 0) : 0);
+      }
+      const refuse = acp && connections++ < (options.refuse ?? 0);
+      let buffer = "";
+      const decoder = new TextDecoder();
+      return ChildProcessSpawner.makeHandle({
+        pid: ChildProcessSpawner.ProcessId(1),
+        exitCode: Deferred.await(exited),
+        isRunning: Deferred.isDone(exited).pipe(Effect.map((done) => !done)),
+        kill: () => Effect.sync(terminate),
+        unref: Effect.succeed(Effect.void),
+        stdin: Sink.forEach((chunk: Uint8Array) =>
+          Effect.sync(() => {
+            buffer += decoder.decode(chunk, { stream: true });
+            let newline = buffer.indexOf("\n");
+            while (newline !== -1) {
+              const line = buffer.slice(0, newline);
+              buffer = buffer.slice(newline + 1);
+              if (line.trim()) {
+                const request = decodeRequest(line);
+                requests.push(request.method);
+                expect(request.method).toBe("initialize");
+                if (refuse) terminate(1);
+                else
+                  Queue.offerUnsafe(
+                    output,
+                    new TextEncoder().encode(
+                      `${encodeJson({
+                        jsonrpc: "2.0",
+                        id: request.id,
+                        result: {
+                          protocolVersion: 1,
+                          agentCapabilities: {},
+                          authMethods: [],
+                          agentInfo: { name: "devin", version: "cloud-server-version" },
+                        },
+                      })}\n`,
+                    ),
+                  );
+              }
+              newline = buffer.indexOf("\n");
+            }
+          }),
+        ),
+        stdout: Stream.fromQueue(output),
+        stderr: Stream.empty,
+        all: Stream.empty,
+        getInputFd: () => Sink.drain,
+        getOutputFd: () => Stream.empty,
       });
-    });
-    yield* Effect.callback<void>((resume) => {
-      server.once("listening", () => resume(Effect.void));
-    });
-    const address = server.address();
-    if (address === null || typeof address === "string")
-      return yield* Effect.die("No relay address");
-    return {
-      credentialsToml: `api_key = "devin-session-token$test"\ndevin_api_url = "http://127.0.0.1:${address.port}"\n`,
-      connections: () => connections,
-      methods,
-    };
-  });
+    }),
+  );
+  return { spawner, calls, requests, connections: () => connections };
+};
 
 describe("buildInitialDevinCloudProviderSnapshot", () => {
   it.effect("shows standard Cloud modes before a session exists", () =>
@@ -217,60 +261,107 @@ describe("makeDevinCloudModelDiscovery", () => {
   );
 });
 
-describe("checkDevinCloudProviderStatus", () => {
-  it.effect("reports unauthenticated with login guidance when credentials are missing", () =>
+describe.each([
+  { name: "devinCloud", checkProvider: checkDevinCloudProviderStatus },
+  { name: "devinCloudCli", checkProvider: checkDevinCloudCliProviderStatus },
+])("Cloud CLI health ($name)", ({ checkProvider }) => {
+  it.effect("reports unauthenticated with login guidance without opening cloud ACP", () =>
     Effect.gen(function* () {
-      const snapshot = yield* checkDevinCloudProviderStatus(decodeSettings({}), {
-        HOME: "/nonexistent-home",
-      });
+      const cli = makeCli({ authenticated: false });
+      const snapshot = yield* checkProvider(decodeSettings({}), {}).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, cli.spawner),
+      );
       expect(snapshot.status).toBe("warning");
       expect(snapshot.auth.status).toBe("unauthenticated");
-      expect(snapshot.message).toContain("devin auth login");
-    }).pipe(Effect.provide(emptyFileSystem)),
+      expect(snapshot.message).toContain("auth login");
+      expect(cli.connections()).toBe(0);
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it.effect("reports disabled without touching the filesystem", () =>
+  it.effect("reports disabled without launching the CLI", () =>
     Effect.gen(function* () {
-      const snapshot = yield* checkDevinCloudProviderStatus(decodeSettings({ enabled: false }), {});
-      expect(snapshot.enabled).toBe(false);
+      const cli = makeCli();
+      const snapshot = yield* checkProvider(decodeSettings({ enabled: false }), {}).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, cli.spawner),
+      );
       expect(snapshot.status).toBe("disabled");
-      expect(snapshot.message).toContain("disabled");
-    }).pipe(Effect.provide(FileSystem.layerNoop({}))),
+      expect(cli.calls).toEqual([]);
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it.live("stays ready when the relay drops a handshake that a retry completes", () =>
+  it.effect("requires explicit migration of custom credentials before probing", () =>
     Effect.gen(function* () {
-      const relay = yield* makeRelay(1);
-      const snapshot = yield* checkDevinCloudProviderStatus(
-        decodeSettings({ credentialsPath: "/relay/credentials.toml" }),
+      const cli = makeCli();
+      const snapshot = yield* checkProvider(
+        decodeSettings({ credentialsPath: "/legacy.toml" }),
         {},
-      ).pipe(Effect.provide(fileSystemWith({ "/relay/credentials.toml": relay.credentialsToml })));
-      expect(relay.connections()).toBe(2);
-      expect(snapshot.status).toBe("ready");
-      expect(snapshot.auth.status).toBe("authenticated");
-      expect(snapshot.version).toBe("relay-test");
-      expect(relay.methods).toContain("initialize");
-      expect(relay.methods.filter((method) => method.startsWith("session/"))).toEqual([]);
-      expect(snapshot.models.map((model) => model.name)).toEqual([
-        "Normal",
-        "Fast",
-        "Ultra",
-        "Lite",
-        "Fusion",
-      ]);
-    }).pipe(Effect.scoped),
+      ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, cli.spawner));
+      expect(snapshot.status).toBe("warning");
+      expect(snapshot.auth.status).toBe("unknown");
+      expect(snapshot.message).toContain("clear the legacy");
+      expect(cli.calls).toEqual([]);
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it.live("reports an outage once retries are exhausted", () =>
+  it.effect("reports a missing CLI", () =>
     Effect.gen(function* () {
-      const relay = yield* makeRelay(Number.POSITIVE_INFINITY);
-      const snapshot = yield* checkDevinCloudProviderStatus(
-        decodeSettings({ credentialsPath: "/relay/credentials.toml" }),
-        {},
-      ).pipe(Effect.provide(fileSystemWith({ "/relay/credentials.toml": relay.credentialsToml })));
-      expect(relay.connections()).toBe(3);
+      const cli = makeCli({ missing: true });
+      const snapshot = yield* checkProvider(decodeSettings({}), {}).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, cli.spawner),
+      );
+      expect(snapshot.installed).toBe(false);
       expect(snapshot.status).toBe("error");
-      expect(snapshot.message).toContain("Could not reach");
-    }).pipe(Effect.scoped),
+      expect(snapshot.message).toContain("Binary path");
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("does not launch ACP after a failing version command", () =>
+    Effect.gen(function* () {
+      const cli = makeCli({ versionCode: 1 });
+      const snapshot = yield* checkProvider(decodeSettings({}), {}).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, cli.spawner),
+      );
+      expect(snapshot.status).toBe("error");
+      expect(cli.calls).toHaveLength(1);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live(
+    "uses the selected CLI and environment and only initializes, never creates a session",
+    () =>
+      Effect.gen(function* () {
+        const cli = makeCli({ refuse: 1 });
+        const snapshot = yield* checkProvider(decodeSettings({ binaryPath: "/bin/devin-stable" }), {
+          XDG_DATA_HOME: "/isolated",
+        }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, cli.spawner));
+        expect(cli.connections()).toBe(2);
+        expect(cli.requests).toEqual(["initialize", "initialize"]);
+        expect(cli.calls.map((call) => call.args)).toEqual([
+          ["--version"],
+          ["auth", "status"],
+          ["acp", "--cloud"],
+          ["acp", "--cloud"],
+        ]);
+        for (const call of cli.calls) {
+          expect(call.command).toBe("/bin/devin-stable");
+          expect(call.env).toMatchObject({ XDG_DATA_HOME: "/isolated" });
+        }
+        expect(snapshot.status).toBe("ready");
+        expect(snapshot.auth.status).toBe("authenticated");
+        expect(snapshot.version).toBe("3000.11.1");
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("reports cloud ACP failure after retries, with upgrade and login guidance", () =>
+    Effect.gen(function* () {
+      const cli = makeCli({ refuse: Number.POSITIVE_INFINITY });
+      const snapshot = yield* checkProvider(decodeSettings({}), {}).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, cli.spawner),
+      );
+      expect(cli.connections()).toBe(3);
+      expect(snapshot.status).toBe("error");
+      expect(snapshot.auth.status).toBe("unknown");
+      expect(snapshot.message).toContain("acp --cloud");
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 });
