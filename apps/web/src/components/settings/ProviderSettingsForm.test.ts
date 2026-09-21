@@ -103,6 +103,27 @@ describe("ProviderSettingsForm helpers", () => {
       });
     },
   );
+  it("configures the cloud CLI and clears legacy credentials without losing organization settings", () => {
+    const cloud = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("devinCloud")]!;
+    const fields = deriveProviderSettingsFields(cloud);
+    const binary = fields.find((field) => field.key === "binaryPath")!;
+    const credentials = fields.find((field) => field.key === "credentialsPath")!;
+    const configured = nextProviderConfigWithFieldValue(
+      {
+        organizationId: "org-selected",
+        credentialsPath: "/custom/credentials.toml",
+      },
+      binary,
+      "devin-stable",
+    );
+    expect(nextProviderConfigWithFieldValue(configured, credentials, "")).toEqual({
+      organizationId: "org-selected",
+      binaryPath: "devin-stable",
+    });
+    expect(
+      nextProviderConfigWithFieldValue({ binaryPath: "devin-stable" }, binary, ""),
+    ).toBeUndefined();
+  });
 
   it("preserves unknown config keys while omitting empty configurable fields", () => {
     const opencode = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("opencode")];

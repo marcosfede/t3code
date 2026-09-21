@@ -65,10 +65,15 @@ uses its account catalog and does not support custom models.
 
 ## Devin Cloud through the CLI
 
-To use your CLI login for Cloud sessions, run `devin-insiders auth login` on the machine
-running your T3 Code environment, then enable **Devin Cloud (CLI)** in Settings → Providers.
-You can configure another binary that supports `acp --cloud`. This provider is separate from
-**Devin Cloud (Websockets)**, which connects directly.
+Run `devin auth login` with a Devin account on the machine running your T3 Code environment,
+then enable **Devin Cloud** in Settings → Providers. The CLI must support `acp --cloud`;
+set **Binary path** if you use a different executable, such as `devin-stable`.
+
+Existing **Devin Cloud (CLI)** providers and their sessions continue to work. Both Cloud
+providers now use the CLI for authentication and connectivity. If you previously configured
+a credentials-file path, sign in with your chosen CLI, then clear **Credentials path (legacy)**.
+For an isolated account, set `XDG_DATA_HOME` in the provider environment and use the same value
+when signing in.
 
 Normal, Fast, Ultra, Lite, and Fusion are available in the picker before starting a session.
 Creating or resuming a Cloud session refreshes the choices with the modes that session supports.

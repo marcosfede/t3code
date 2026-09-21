@@ -871,11 +871,18 @@ export const DevinCloudSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    binaryPath: makeBinaryPathSetting("devin").pipe(
+      Schema.annotateKey({
+        title: "Binary path",
+        description: "Path to a Devin CLI with `acp --cloud` support.",
+        providerSettingsForm: { placeholder: "devin", clearWhenEmpty: "omit" },
+      }),
+    ),
     credentialsPath: Schema.optionalKey(TrimmedNonEmptyString).pipe(
       Schema.annotateKey({
-        title: "Credentials path",
+        title: "Credentials path (legacy)",
         description:
-          "Path to the Devin CLI credentials file. Defaults to the location written by `devin auth login`.",
+          "No longer read by T3. Sign in with the configured Devin CLI using `auth login`, then clear this field. For an isolated account, set XDG_DATA_HOME in the provider environment.",
         providerSettingsForm: {
           placeholder: "~/.local/share/devin/credentials.toml",
           clearWhenEmpty: "omit",
@@ -888,7 +895,7 @@ export const DevinCloudSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["organizationId", "credentialsPath"],
+    order: ["binaryPath", "organizationId", "credentialsPath"],
   },
 );
 export type DevinCloudSettings = typeof DevinCloudSettings.Type;
@@ -1524,6 +1531,7 @@ const DevinSettingsPatch = Schema.Struct({
 
 const DevinCloudSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
+  binaryPath: Schema.optionalKey(TrimmedString),
   organizationId: Schema.optionalKey(TrimmedNonEmptyString),
   credentialsPath: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
