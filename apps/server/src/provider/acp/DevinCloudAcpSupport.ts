@@ -103,12 +103,40 @@ export function buildDevinCloudAcpWebSocketUrl(credentials: DevinCloudCredential
   return url.toString();
 }
 
+export const withDevinCloudOrganization = Effect.fn("withDevinCloudOrganization")(function* (
+  runtime: AcpSessionRuntime.AcpSessionRuntime["Service"],
+  configuredOrganizationId: string | undefined,
+) {
+  const organizationId = configuredOrganizationId?.trim();
+  if (!organizationId) return runtime;
+  const start = yield* Effect.cached(
+    Effect.gen(function* () {
+      const started = yield* runtime.start();
+      const selected = yield* runtime.setConfigOption("org_id", organizationId);
+      return {
+        ...started,
+        sessionSetupResult: {
+          ...started.sessionSetupResult,
+          configOptions: selected.configOptions,
+          _meta: { ...started.sessionSetupResult._meta, ...selected._meta },
+        },
+      };
+    }),
+  );
+  return {
+    ...runtime,
+    start: () => start,
+    prompt: (payload, options) => start.pipe(Effect.andThen(runtime.prompt(payload, options))),
+  } satisfies AcpSessionRuntime.AcpSessionRuntime["Service"];
+});
+
 interface DevinCloudAcpRuntimeInput extends Omit<
   AcpSessionRuntime.AcpSessionRuntimeOptions,
   "authMethodId" | "clientCapabilities" | "spawn" | "webSocket"
 > {
   readonly childProcessSpawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
   readonly credentials: DevinCloudCredentials;
+  readonly organizationId?: string;
 }
 
 /**
@@ -139,8 +167,12 @@ export const makeDevinCloudAcpRuntime = (
           ),
         ),
       );
-      return yield* Effect.service(AcpSessionRuntime.AcpSessionRuntime).pipe(
+      const runtime = yield* Effect.service(AcpSessionRuntime.AcpSessionRuntime).pipe(
         Effect.provide(acpContext),
+      );
+      return yield* withDevinCloudOrganization(
+        runtime,
+        connectionOptions.resumeSessionId ? undefined : input.organizationId,
       );
     }),
   );

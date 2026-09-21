@@ -225,6 +225,14 @@ export const ServerProvider = Schema.Struct({
   // Human-readable reason populated when `availability === "unavailable"`.
   // Surfaces in the UI alongside the missing-driver affordance.
   unavailableReason: Schema.optional(TrimmedNonEmptyString),
+  organizations: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        id: TrimmedNonEmptyString,
+        name: TrimmedNonEmptyString,
+      }),
+    ),
+  ),
   models: Schema.Array(ServerProviderModel),
   slashCommands: Schema.Array(ServerProviderSlashCommand).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
