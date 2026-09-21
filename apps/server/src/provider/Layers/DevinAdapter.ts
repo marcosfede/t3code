@@ -88,7 +88,7 @@ export interface DevinAdapterLiveOptions {
   /** Driver kind stamped on sessions and errors; defaults to local `devin`. */
   readonly provider?: ProviderDriverKind;
   /** ACP runtime factory; defaults to spawning the local `devin acp` CLI.
-   * Devin Cloud passes a WebSocket-backed factory here. */
+   * Devin Cloud passes a CLI relay factory here. */
   readonly makeAcpRuntime?: DevinAcpRuntimeFactory;
 }
 

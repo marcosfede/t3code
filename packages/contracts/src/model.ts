@@ -233,7 +233,7 @@ export const PROVIDER_DISPLAY_NAMES: Partial<Record<ProviderDriverKind, string>>
   [CURSOR_DRIVER_KIND]: "Cursor",
   [GROK_DRIVER_KIND]: "Grok",
   [DEVIN_DRIVER_KIND]: "Devin",
-  [DEVIN_CLOUD_DRIVER_KIND]: "Devin Cloud (Websockets)",
+  [DEVIN_CLOUD_DRIVER_KIND]: "Devin Cloud",
   [DEVIN_CLOUD_CLI_DRIVER_KIND]: "Devin Cloud (CLI)",
   [OPENCODE_DRIVER_KIND]: "OpenCode",
 };

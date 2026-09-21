@@ -174,8 +174,8 @@ const discoverDevinModelsViaAcp = (
     return buildDevinDiscoveredModelsFromSessionSetup(started.sessionSetupResult);
   }).pipe(Effect.scoped);
 
-const runDevinCliCommand = (
-  devinSettings: DevinSettings,
+export const runDevinCliCommand = (
+  devinSettings: Pick<DevinSettings, "binaryPath">,
   args: ReadonlyArray<string>,
   environment: NodeJS.ProcessEnv = process.env,
 ) =>
