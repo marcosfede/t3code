@@ -1518,31 +1518,33 @@ const make = Effect.gen(function* () {
         return;
       }
 
-      yield* providerService
+      return providerService
         .sendTurn(sendTurnRequest.value)
         .pipe(Effect.asVoid, Effect.catchCause(recoverTurnStartFailure));
     });
 
     const settlingInterrupt = settlingInterrupts.get(event.payload.threadId);
-    const waitForInterrupt = settlingInterrupt === undefined
-      ? Effect.void
-      : Deferred.await(settlingInterrupt).pipe(
-          Effect.timeoutOption(INTERRUPT_SETTLE_TIMEOUT),
-          Effect.flatMap(
-            Option.match({
-              onNone: () =>
-                Effect.logWarning("provider command reactor timed out waiting for interrupt", {
-                  threadId: event.payload.threadId,
-                }).pipe(Effect.andThen(settleInterrupt(event.payload.threadId))),
-              onSome: () => Effect.void,
-            }),
-          ),
-        );
+    const send =
+      settlingInterrupt === undefined
+        ? ((yield* startTurn) ?? Effect.void)
+        : Deferred.await(settlingInterrupt).pipe(
+            Effect.timeoutOption(INTERRUPT_SETTLE_TIMEOUT),
+            Effect.flatMap(
+              Option.match({
+                onNone: () =>
+                  Effect.logWarning("provider command reactor timed out waiting for interrupt", {
+                    threadId: event.payload.threadId,
+                  }).pipe(Effect.andThen(settleInterrupt(event.payload.threadId))),
+                onSome: () => Effect.void,
+              }),
+            ),
+            Effect.andThen(startTurn),
+            Effect.flatMap((send) => send ?? Effect.void),
+          );
     // The forked send settles `sent` from here on, so drop the entry the post-processing hook uses.
     if (resumed && event.commandId !== null) resumedTurnStarts.delete(event.commandId);
     // Off the shared worker so a slow provider only delays this thread.
-    yield* waitForInterrupt.pipe(
-      Effect.andThen(startTurn),
+    yield* send.pipe(
       Effect.ensuring(resumed ? Deferred.succeed(resumed.sent, undefined) : Effect.void),
       Effect.forkScoped,
     );
@@ -1928,7 +1930,7 @@ const make = Effect.gen(function* () {
     );
     const processEvent = Effect.fn("processEvent")(function* (event: OrchestrationEvent) {
       if (event.type === "thread.session-set" && event.payload.session.status !== "running") {
-        return yield* settleInterrupt(event.payload.threadId);
+        yield* settleInterrupt(event.payload.threadId);
       }
       if (
         (event.type === "thread.meta-updated" &&
