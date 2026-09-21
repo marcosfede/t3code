@@ -2516,6 +2516,9 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
               deepMerge(encodedDefaultServerSettings, {
                 providers: {
                   codex: { enabled: true, binaryPath: firstMissing },
+                  devin: { enabled: false },
+                  devinCloud: { enabled: false },
+                  devinCloudCli: { enabled: false },
                   claudeAgent: { enabled: false },
                   cursor: { enabled: false },
                   grok: { enabled: false },
@@ -2777,6 +2780,9 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
                 "claudeAgent",
                 "codex",
                 "cursor",
+                "devin",
+                "devinCloud",
+                "devinCloudCli",
                 "grok",
                 "opencode",
               ]);
