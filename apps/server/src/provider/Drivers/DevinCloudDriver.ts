@@ -6,7 +6,6 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
-import * as EffectAcpErrors from "effect-acp/errors";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
@@ -35,10 +34,7 @@ import {
   makeProviderSnapshotSettingsSource,
   type ProviderSnapshotSettings,
 } from "../providerUpdateSettings.ts";
-import {
-  loadDevinCloudCredentials,
-  makeDevinCloudAcpRuntime,
-} from "../acp/DevinCloudAcpSupport.ts";
+import { makeDevinCloudAcpRuntime } from "../acp/DevinCloudAcpSupport.ts";
 import { type DevinAcpRuntimeFactory } from "../acp/DevinAcpSupport.ts";
 
 const decodeDevinCloudSettings = Schema.decodeSync(DevinCloudSettings);
@@ -79,7 +75,7 @@ const withInstanceIdentity =
 export const DevinCloudDriver: ProviderDriver<DevinCloudSettings, DevinCloudDriverEnv> = {
   driverKind: DRIVER_KIND,
   metadata: {
-    displayName: "Devin Cloud (Websockets)",
+    displayName: "Devin Cloud",
     supportsMultipleInstances: true,
   },
   configSchema: DevinCloudSettings,
@@ -88,7 +84,6 @@ export const DevinCloudDriver: ProviderDriver<DevinCloudSettings, DevinCloudDriv
     Effect.gen(function* () {
       const crypto = yield* Crypto.Crypto;
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const fileSystem = yield* FileSystem.FileSystem;
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
@@ -107,20 +102,14 @@ export const DevinCloudDriver: ProviderDriver<DevinCloudSettings, DevinCloudDriv
       const modelDiscovery = yield* makeDevinCloudModelDiscovery(effectiveConfig.customModels);
 
       const makeAcpRuntime: DevinAcpRuntimeFactory = (runtimeInput) =>
-        loadDevinCloudCredentials(effectiveConfig, processEnv).pipe(
-          Effect.provideService(FileSystem.FileSystem, fileSystem),
-          Effect.mapError((cause) => new EffectAcpErrors.AcpSpawnError({ cause })),
-          Effect.flatMap((credentials) =>
-            makeDevinCloudAcpRuntime({
-              ...runtimeInput,
-              credentials,
-              ...(effectiveConfig.organizationId
-                ? { organizationId: effectiveConfig.organizationId }
-                : {}),
-            }),
-          ),
-          Effect.map(modelDiscovery.observeRuntime),
-        );
+        makeDevinCloudAcpRuntime({
+          ...runtimeInput,
+          environment: processEnv,
+          cloudSettings: effectiveConfig,
+          ...(effectiveConfig.organizationId
+            ? { organizationId: effectiveConfig.organizationId }
+            : {}),
+        }).pipe(Effect.map(modelDiscovery.observeRuntime));
 
       const adapter = yield* makeDevinAdapter(null, {
         environment: processEnv,
@@ -133,7 +122,8 @@ export const DevinCloudDriver: ProviderDriver<DevinCloudSettings, DevinCloudDriv
 
       const checkProvider = checkDevinCloudProviderStatus(effectiveConfig, processEnv).pipe(
         Effect.map(stampIdentity),
-        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       );
 
       const snapshotSettings = makeProviderSnapshotSettingsSource(effectiveConfig, serverSettings);

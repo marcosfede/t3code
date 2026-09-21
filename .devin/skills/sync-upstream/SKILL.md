@@ -58,7 +58,7 @@ git rebase upstream/main
 Conflict hot spots:
 
 - **Provider registration lists** (`packages/contracts/src/settings.ts`, `apps/web/src/session-logic.ts`, provider icon/settings metadata, `apps/server/package.json`, `pnpm-lock.yaml`): retain both upstream additions and Devin entries, upstream first. Keep schemas as complete sequential definitions.
-- **`apps/server/src/provider/acp/AcpSessionRuntime.ts`**: preserve the fork's spawn/WebSocket split and `awaitTermination`; integrate upstream spawn changes inside the spawn branch and feed termination from `recordTermination`. Teardown belongs on the transport's termination effect.
+- **`apps/server/src/provider/acp/AcpSessionRuntime.ts`**: preserve `awaitTermination`, stderr diagnostics, and process teardown through `recordTermination`. Both Devin Cloud provider IDs use CLI stdio (`acp --cloud`); do not restore the removed direct WebSocket transport or credential parser.
 - **`apps/server/scripts/acp-mock-agent.ts`**: retain upstream profile hooks alongside the fork's `T3_ACP_EXIT_AFTER_SESSION_MS` hook.
 - Prefer upstream's implementation when it supersedes a fork fix.
 
@@ -69,7 +69,7 @@ vp i
 vp run --filter t3 typecheck
 vp run --filter @t3tools/contracts typecheck
 vp run --filter @t3tools/web typecheck
-vp test run apps/server/src/provider/Layers/DevinAdapter.test.ts apps/server/src/provider/acp/DevinAcpSupport.test.ts apps/server/src/provider/acp/AcpWebSocketStdio.test.ts packages/effect-acp/src/client.test.ts
+vp test run apps/server/src/provider/Layers/DevinAdapter.test.ts apps/server/src/provider/acp/DevinAcpSupport.test.ts apps/server/src/provider/acp/DevinCloudAcpSupport.test.ts packages/effect-acp/src/client.test.ts
 vp check <files-you-hand-edited>
 ```
 

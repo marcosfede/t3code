@@ -175,6 +175,27 @@ describe("Devin Cloud CLI settings", () => {
       }).providers?.devinCloudCli,
     ).toEqual({ enabled: false, binaryPath: "devin" });
   });
+
+  it("defaults existing cloud settings to devin and preserves legacy credentials for migration", () => {
+    const settings = decodeServerSettings({
+      providers: { devinCloud: { credentialsPath: "/legacy/credentials.toml" } },
+    });
+    expect(settings.providers?.devinCloud).toMatchObject({
+      binaryPath: "devin",
+      credentialsPath: "/legacy/credentials.toml",
+    });
+    const configured = decodeServerSettings({
+      providers: { devinCloud: { binaryPath: " /bin/devin-stable " } },
+    });
+    expect(encodeServerSettings(configured).providers?.devinCloud?.binaryPath).toBe(
+      "/bin/devin-stable",
+    );
+    expect(
+      decodeServerSettingsPatch({
+        providers: { devinCloud: { binaryPath: "/bin/devin-stable", credentialsPath: "" } },
+      }).providers?.devinCloud,
+    ).toEqual({ binaryPath: "/bin/devin-stable", credentialsPath: "" });
+  });
 });
 
 describe("Devin Cloud organization settings", () => {

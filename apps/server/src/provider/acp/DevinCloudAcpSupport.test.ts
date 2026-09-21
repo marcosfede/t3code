@@ -1,6 +1,4 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as NodeModule from "node:module";
-import * as Path from "effect/Path";
 import { describe, expect, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
@@ -14,14 +12,10 @@ import * as Scope from "effect/Scope";
 import * as Exit from "effect/Exit";
 import * as TestClock from "effect/testing/TestClock";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
-import { WebSocketServer, type WebSocket } from "ws";
+import * as Sink from "effect/Sink";
 import type * as AcpSchema from "effect-acp/schema";
-import * as FileSystem from "effect/FileSystem";
-import * as PlatformError from "effect/PlatformError";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import {
   ApprovalRequestId,
-  DevinCloudCliSettings,
   DevinCloudSettings,
   ProviderInstanceId,
   ProviderDriverKind,
@@ -37,130 +31,54 @@ import {
 import type { AcpToolCallState } from "./AcpRuntimeModel.ts";
 import { makeDevinCloudCliAcpRuntime } from "./DevinCloudCliAcpSupport.ts";
 import type { DevinAcpRuntimeFactory, DevinAcpRuntimeFactoryInput } from "./DevinAcpSupport.ts";
-import { checkDevinCloudCliProviderStatus } from "../Layers/DevinCloudCliProvider.ts";
 import type { ProviderSessionHistory } from "../Services/ProviderAdapter.ts";
 import { ProviderAdapterRequestError } from "../Errors.ts";
 
-import {
-  buildDevinCloudAcpWebSocketUrl,
-  defaultDevinCredentialsPath,
-  DevinCloudCredentialsError,
-  loadDevinCloudCredentials,
-  makeDevinCloudAcpRuntime,
-} from "./DevinCloudAcpSupport.ts";
+import { buildDevinCloudAcpSpawnInput, makeDevinCloudAcpRuntime } from "./DevinCloudAcpSupport.ts";
 
 const decodeCloudSettings = Schema.decodeSync(DevinCloudSettings);
 
-const CREDENTIALS_TOML = `
-schema_version = "1.0"
-api_key = "devin-session-token$abc123"
-devin_api_url = "https://api.devin.ai"
-`;
-
-const fileSystemWith = (files: Record<string, string>) =>
-  FileSystem.layerNoop({
-    readFileString: (path) =>
-      path in files
-        ? Effect.succeed(files[path]!)
-        : Effect.fail(
-            PlatformError.systemError({
-              _tag: "NotFound",
-              module: "FileSystem",
-              method: "readFileString",
-              description: "no such file",
-              pathOrDescriptor: path,
-            }),
-          ),
+describe("buildDevinCloudAcpSpawnInput", () => {
+  it("uses the configured CLI and environment for cloud ACP", () => {
+    expect(
+      buildDevinCloudAcpSpawnInput({ binaryPath: "/bin/devin-stable" }, "/workspace", {
+        XDG_DATA_HOME: "/isolated",
+      }),
+    ).toEqual({
+      command: "/bin/devin-stable",
+      args: ["acp", "--cloud"],
+      cwd: "/workspace",
+      env: { XDG_DATA_HOME: "/isolated" },
+      forceKillAfter: "1 second",
+    });
   });
 
-describe("defaultDevinCredentialsPath", () => {
-  it("prefers XDG_DATA_HOME", () => {
-    expect(defaultDevinCredentialsPath({ XDG_DATA_HOME: "/xdg", HOME: "/home/u" }, "linux")).toBe(
-      "/xdg/devin/credentials.toml",
-    );
+  it("defaults to devin on PATH", () => {
+    expect(buildDevinCloudAcpSpawnInput(null, "/workspace")).toMatchObject({
+      command: "devin",
+      args: ["acp", "--cloud"],
+    });
   });
 
-  it("falls back to ~/.local/share", () => {
-    expect(defaultDevinCredentialsPath({ HOME: "/home/u" }, "linux")).toBe(
-      "/home/u/.local/share/devin/credentials.toml",
-    );
-  });
-
-  it("uses APPDATA on Windows", () => {
-    expect(defaultDevinCredentialsPath({ APPDATA: "C:/Users/u/AppData/Roaming" }, "win32")).toBe(
-      "C:/Users/u/AppData/Roaming/devin/credentials.toml",
-    );
-  });
+  it.effect("rejects legacy credentials before launching a different account", () =>
+    Effect.gen(function* () {
+      const result = yield* makeDevinCloudAcpRuntime({
+        cloudSettings: { binaryPath: "devin", credentialsPath: "/custom/credentials.toml" },
+        childProcessSpawner: ChildProcessSpawner.make(() => Effect.die("must not spawn")),
+        cwd: "/workspace",
+        clientInfo: { name: "test", version: "1" },
+      }).pipe(Effect.exit);
+      expect(Exit.isFailure(result)).toBe(true);
+      if (Exit.isFailure(result)) expect(Cause.pretty(result.cause)).toContain("clear the legacy");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
 });
 
-describe("loadDevinCloudCredentials", () => {
-  it.effect("reads the token and API URL from credentials.toml", () =>
-    Effect.gen(function* () {
-      const credentials = yield* loadDevinCloudCredentials(
-        { credentialsPath: "/creds/credentials.toml" },
-        {},
-      );
-      expect(credentials).toEqual({ token: "abc123", apiUrl: "https://api.devin.ai" });
-    }).pipe(Effect.provide(fileSystemWith({ "/creds/credentials.toml": CREDENTIALS_TOML }))),
-  );
-
-  it.effect("uses the default path when settings do not override it", () =>
-    Effect.gen(function* () {
-      const credentials = yield* loadDevinCloudCredentials(null, { HOME: "/home/u" }).pipe(
-        Effect.provideService(HostProcessPlatform, "linux"),
-      );
-      expect(credentials.token).toBe("abc123");
-    }).pipe(
-      Effect.provide(
-        fileSystemWith({ "/home/u/.local/share/devin/credentials.toml": CREDENTIALS_TOML }),
-      ),
-    ),
-  );
-
-  it.effect("fails with missing-file when the credentials file is absent", () =>
-    Effect.gen(function* () {
-      const error = yield* Effect.flip(
-        loadDevinCloudCredentials({ credentialsPath: "/missing.toml" }, {}),
-      );
-      expect(error).toBeInstanceOf(DevinCloudCredentialsError);
-      expect(error.issue).toBe("missing-file");
-      expect(error.message).toContain("devin auth login");
-    }).pipe(Effect.provide(fileSystemWith({}))),
-  );
-
-  it.effect("fails with not-devin-token for a non-Devin account token", () =>
-    Effect.gen(function* () {
-      const error = yield* Effect.flip(
-        loadDevinCloudCredentials({ credentialsPath: "/c.toml" }, {}),
-      );
-      expect(error.issue).toBe("not-devin-token");
-    }).pipe(
-      Effect.provide(
-        fileSystemWith({
-          "/c.toml": 'api_key = "other-token"\ndevin_api_url = "https://api.devin.ai"\n',
-        }),
-      ),
-    ),
-  );
-
-  it.effect("fails with missing-token when no api_key field exists", () =>
-    Effect.gen(function* () {
-      const error = yield* Effect.flip(
-        loadDevinCloudCredentials({ credentialsPath: "/c.toml" }, {}),
-      );
-      expect(error.issue).toBe("missing-token");
-    }).pipe(Effect.provide(fileSystemWith({ "/c.toml": 'devin_api_url = "https://x"\n' }))),
-  );
-
-  it.effect("fails with missing-api-url when devin_api_url is absent", () =>
-    Effect.gen(function* () {
-      const error = yield* Effect.flip(
-        loadDevinCloudCredentials({ credentialsPath: "/c.toml" }, {}),
-      );
-      expect(error.issue).toBe("missing-api-url");
-    }).pipe(Effect.provide(fileSystemWith({ "/c.toml": 'api_key = "devin-session-token$abc"\n' }))),
-  );
-});
+interface CloudConnection {
+  readonly send: (data: string) => void;
+  readonly terminate: () => void;
+  readonly close: (code?: number, reason?: string) => void;
+}
 
 const sessionId = "devin-reconnect-test";
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -177,7 +95,7 @@ const decodeRequest = Schema.decodeUnknownSync(
 
 // Cloud replays history on session/load exactly like live updates: same shape, no
 // replay marker, only the `cognition.ai/eventId` identifies an already-seen event.
-const sendUpdate = (socket: WebSocket, update: AcpSchema.SessionNotification["update"]) =>
+const sendUpdate = (socket: CloudConnection, update: AcpSchema.SessionNotification["update"]) =>
   socket.send(
     encodeJson({
       jsonrpc: "2.0",
@@ -197,129 +115,112 @@ const statusUpdate = (status: string): AcpSchema.SessionNotification["update"] =
   _meta: { "cognition.ai/eventType": "status_update", "cognition.ai/statusEnum": status },
 });
 
-const makeMockCloudCli = (
-  url: string,
-  options?: { unsupported?: boolean; versionFailure?: boolean },
-) =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cloud-cli-test-" });
-    const script = path.join(dir, "relay.cjs");
-    const binaryPath = path.join(dir, "devin-insiders");
-    yield* fs.writeFileString(
-      script,
-      `
-const { WebSocket } = require(${encodeJson(NodeModule.createRequire(import.meta.url).resolve("ws"))});
-if (process.argv[2] === "--version") {
-  console.log("devin-insiders 1.2.3");
-  process.exit(${options?.versionFailure ? 1 : 0});
-}
-if (${options?.unsupported === true} || process.argv[2] !== "acp" || process.argv[3] !== "--cloud") process.exit(2);
-const socket = new WebSocket(${encodeJson(url)});
-let buffered = "";
-function flush() {
-  while (socket.readyState === WebSocket.OPEN && buffered.includes("\\n")) {
-    const end = buffered.indexOf("\\n");
-    const line = buffered.slice(0, end);
-    buffered = buffered.slice(end + 1);
-    if (line.trim()) socket.send(line);
-  }
-}
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => { buffered += chunk; flush(); });
-socket.on("open", flush);
-socket.on("message", (data) => process.stdout.write(String(data) + "\\n"));
-socket.on("close", () => process.exit(0));
-socket.on("error", () => process.exit(1));
-process.stdin.on("end", () => { socket.close(); process.exit(0); });
-process.on("SIGTERM", () => { socket.close(); process.exit(0); });
-`,
-    );
-    yield* fs.writeFileString(
-      binaryPath,
-      `#!/bin/sh\nexec ${encodeJson(process.execPath)} ${encodeJson(script)} "$@"\n`,
-    );
-    yield* fs.chmod(binaryPath, 0o755);
-    return binaryPath;
-  });
-
 const makeCloudTransportServer = (
-  onLoad?: (socket: WebSocket, request: ReturnType<typeof decodeRequest>) => boolean | void,
-  transport: "websocket" | "cli" = "websocket",
+  onLoad?: (socket: CloudConnection, request: ReturnType<typeof decodeRequest>) => boolean | void,
+  transport: "primary" | "cli" = "primary",
   autoStart = true,
-  onRequest?: (socket: WebSocket, request: ReturnType<typeof decodeRequest>) => boolean | void,
+  onRequest?: (
+    socket: CloudConnection,
+    request: ReturnType<typeof decodeRequest>,
+  ) => boolean | void,
 ) =>
   Effect.gen(function* () {
-    const connections = yield* Queue.unbounded<WebSocket>();
-    const prompts = yield* Queue.unbounded<WebSocket>();
-    const loads = yield* Queue.unbounded<WebSocket>();
+    const connections = yield* Queue.unbounded<CloudConnection>();
+    const prompts = yield* Queue.unbounded<CloudConnection>();
+    const loads = yield* Queue.unbounded<CloudConnection>();
     const failedLoads = yield* Queue.unbounded<void>();
-    const cancellations = yield* Queue.unbounded<WebSocket>();
+    const cancellations = yield* Queue.unbounded<CloudConnection>();
     const requests: Array<ReturnType<typeof decodeRequest>> = [];
     const responses = yield* Queue.unbounded<ReturnType<typeof decodeRequest>>();
-    const server = yield* Effect.acquireRelease(
-      Effect.sync(() => new WebSocketServer({ host: "127.0.0.1", port: 0 })),
-      (server) =>
-        Effect.callback<void>((resume) => {
-          for (const socket of server.clients) socket.terminate();
-          server.close(() => resume(Effect.void));
-        }),
-    );
-    server.on("connection", (socket) => {
-      Queue.offerUnsafe(connections, socket);
-      socket.on("message", (data) => {
-        const request = decodeRequest(String(data));
-        if (request.method === undefined) {
-          Queue.offerUnsafe(responses, request);
-          return;
-        }
-        requests.push(request);
-        if (onRequest?.(socket, request) === false) return;
-        let result: unknown;
-        switch (request.method) {
-          case "initialize":
-            result = {
-              protocolVersion: 1,
-              agentCapabilities: { loadSession: true },
-              authMethods: [],
-            };
-            break;
-          case "session/new":
-            result = { sessionId };
-            break;
-          case "session/load":
-            if (onLoad?.(socket, request) === false) {
-              Queue.offerUnsafe(loads, socket);
+    const spawner = ChildProcessSpawner.make((command) =>
+      Effect.gen(function* () {
+        expect(command).toMatchObject({ command: "devin", args: ["acp", "--cloud"] });
+        const output = yield* Queue.unbounded<Uint8Array, Cause.Done>();
+        const exited = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+        const terminate = () => {
+          Deferred.doneUnsafe(exited, Effect.succeed(ChildProcessSpawner.ExitCode(1)));
+          Queue.endUnsafe(output);
+        };
+        const socket: CloudConnection = {
+          send: (data) => {
+            Queue.offerUnsafe(output, new TextEncoder().encode(`${data}\n`));
+          },
+          terminate,
+          close: terminate,
+        };
+        yield* Effect.addFinalizer(() => Effect.sync(terminate));
+        Queue.offerUnsafe(connections, socket);
+        const handleRequest = (data: string) => {
+          const request = decodeRequest(String(data));
+          if (request.method === undefined) {
+            Queue.offerUnsafe(responses, request);
+            return;
+          }
+          requests.push(request);
+          if (onRequest?.(socket, request) === false) return;
+          let result: unknown;
+          switch (request.method) {
+            case "initialize":
+              result = {
+                protocolVersion: 1,
+                agentCapabilities: { loadSession: true },
+                authMethods: [],
+              };
+              break;
+            case "session/new":
+              result = { sessionId };
+              break;
+            case "session/load":
+              if (onLoad?.(socket, request) === false) {
+                Queue.offerUnsafe(loads, socket);
+                return;
+              }
+              result = { _meta: { "cognition.ai/statusEnum": "working" } };
+              break;
+            case "session/cancel":
+              Queue.offerUnsafe(cancellations, socket);
               return;
-            }
-            result = { _meta: { "cognition.ai/statusEnum": "working" } };
-            break;
-          case "session/cancel":
-            Queue.offerUnsafe(cancellations, socket);
-            return;
-          case "session/prompt":
-            Queue.offerUnsafe(prompts, socket);
-            return;
-          default:
-            result = {};
-        }
-        if (request.id !== undefined)
-          socket.send(encodeJson({ jsonrpc: "2.0", id: request.id, result }));
-        if (request.method === "session/load") Queue.offerUnsafe(loads, socket);
-      });
-    });
-    yield* Effect.callback<void>((resume) => {
-      server.once("listening", () => resume(Effect.void));
-    });
-    const address = server.address();
-    if (address === null || typeof address === "string")
-      return yield* Effect.die("No test server address");
-    const binaryPath =
-      transport === "cli" ? yield* makeMockCloudCli(`ws://127.0.0.1:${address.port}`) : undefined;
+            case "session/prompt":
+              Queue.offerUnsafe(prompts, socket);
+              return;
+            default:
+              result = {};
+          }
+          if (request.id !== undefined)
+            socket.send(encodeJson({ jsonrpc: "2.0", id: request.id, result }));
+          if (request.method === "session/load") Queue.offerUnsafe(loads, socket);
+        };
+        let buffer = "";
+        const decoder = new TextDecoder();
+        return ChildProcessSpawner.makeHandle({
+          pid: ChildProcessSpawner.ProcessId(1),
+          exitCode: Deferred.await(exited),
+          isRunning: Deferred.isDone(exited).pipe(Effect.map((done) => !done)),
+          kill: () => Effect.sync(terminate),
+          unref: Effect.succeed(Effect.void),
+          stdin: Sink.forEach((chunk: Uint8Array) =>
+            Effect.sync(() => {
+              buffer += decoder.decode(chunk, { stream: true });
+              let newline = buffer.indexOf("\n");
+              while (newline !== -1) {
+                const line = buffer.slice(0, newline);
+                buffer = buffer.slice(newline + 1);
+                if (line.trim()) handleRequest(line);
+                newline = buffer.indexOf("\n");
+              }
+            }),
+          ),
+          stdout: Stream.fromQueue(output),
+          stderr: Stream.empty,
+          all: Stream.empty,
+          getInputFd: () => Sink.drain,
+          getOutputFd: () => Stream.empty,
+        });
+      }),
+    );
     const runtimeScope = yield* Scope.fork(yield* Scope.Scope, "sequential");
     const runtimeInput: DevinAcpRuntimeFactoryInput = {
-      childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
+      childProcessSpawner: spawner,
       cwd: process.cwd(),
       clientInfo: { name: "test", version: "1" },
       requestLogger: (event) =>
@@ -328,15 +229,17 @@ const makeCloudTransportServer = (
           : Effect.void,
     };
     const makeRuntime = (input: Parameters<DevinAcpRuntimeFactory>[0], organizationId?: string) =>
-      binaryPath
+      transport === "cli"
         ? makeDevinCloudCliAcpRuntime({
             ...input,
-            settings: { binaryPath, ...(organizationId ? { organizationId } : {}) },
+            childProcessSpawner: spawner,
+            settings: { binaryPath: "devin", ...(organizationId ? { organizationId } : {}) },
           })
         : makeDevinCloudAcpRuntime({
             ...input,
+            childProcessSpawner: spawner,
             ...(organizationId ? { organizationId } : {}),
-            credentials: { apiUrl: `http://127.0.0.1:${address.port}`, token: "test" },
+            cloudSettings: null,
           });
     const runtime = yield* makeRuntime(runtimeInput).pipe(
       Effect.provideService(Scope.Scope, runtimeScope),
@@ -362,7 +265,6 @@ const makeCloudTransportServer = (
     return {
       makeRuntime,
       runtime,
-      binaryPath,
       runtimeScope,
       requests,
       responses,
@@ -379,7 +281,7 @@ const makeCloudTransportServer = (
     };
   });
 
-describe.each(["websocket", "cli"] as const)(
+describe.each(["primary", "cli"] as const)(
   "Devin Cloud organization selection (%s)",
   (transport) => {
     const makeCloudServer = (
@@ -561,7 +463,7 @@ describe.each(["websocket", "cli"] as const)(
   },
 );
 
-describe.each(["websocket", "cli"] as const)("Devin Cloud import (%s)", (transport) => {
+describe.each(["primary", "cli"] as const)("Devin Cloud import (%s)", (transport) => {
   const makeCloudServer = (onLoad?: Parameters<typeof makeCloudTransportServer>[0]) =>
     makeCloudTransportServer(onLoad, transport);
   const provider = ProviderDriverKind.make(transport === "cli" ? "devinCloudCli" : "devinCloud");
@@ -700,7 +602,7 @@ describe.each(["websocket", "cli"] as const)("Devin Cloud import (%s)", (transpo
   );
 });
 
-describe.each(["websocket", "cli"] as const)("Devin Cloud reconnection (%s)", (transport) => {
+describe.each(["primary", "cli"] as const)("Devin Cloud reconnection (%s)", (transport) => {
   const makeCloudServer = (onLoad?: Parameters<typeof makeCloudTransportServer>[0]) =>
     makeCloudTransportServer(onLoad, transport);
   it.live("preserves attachment links alongside assistant text through the cloud transport", () =>
@@ -1112,96 +1014,4 @@ describe.each(["websocket", "cli"] as const)("Devin Cloud reconnection (%s)", (t
       );
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
-});
-
-const decodeCloudCliSettings = Schema.decodeSync(DevinCloudCliSettings);
-
-describe("Devin Cloud CLI health", () => {
-  it.live("initializes the CLI relay without creating or loading a Cloud session", () =>
-    Effect.gen(function* () {
-      const server = yield* makeCloudTransportServer(undefined, "cli", false);
-      const snapshot = yield* checkDevinCloudCliProviderStatus(
-        decodeCloudCliSettings({ enabled: true, binaryPath: server.binaryPath }),
-      );
-      expect(snapshot.status).toBe("ready");
-      expect(snapshot.auth.status).toBe("authenticated");
-      expect(snapshot.version).toBe("1.2.3");
-      expect(snapshot.models.map((model) => model.name)).toEqual([
-        "Normal",
-        "Fast",
-        "Ultra",
-        "Lite",
-        "Fusion",
-      ]);
-      expect(server.requests.map((request) => request.method)).toContain("initialize");
-      expect(server.requests.filter((request) => request.method?.startsWith("session/"))).toEqual(
-        [],
-      );
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect("does not execute the CLI when disabled", () =>
-    Effect.gen(function* () {
-      const snapshot = yield* checkDevinCloudCliProviderStatus(
-        decodeCloudCliSettings({ enabled: false, binaryPath: "/missing/cloud-cli" }),
-      );
-      expect(snapshot.status).toBe("disabled");
-      expect(snapshot.installed).toBe(false);
-    }).pipe(Effect.provide(NodeServices.layer)),
-  );
-
-  it.live("reports a missing CLI without claiming authentication", () =>
-    Effect.gen(function* () {
-      const snapshot = yield* checkDevinCloudCliProviderStatus(
-        decodeCloudCliSettings({ enabled: true, binaryPath: "/missing/cloud-cli" }),
-      );
-      expect(snapshot.status).toBe("error");
-      expect(snapshot.installed).toBe(false);
-      expect(snapshot.auth.status).toBe("unknown");
-    }).pipe(Effect.provide(NodeServices.layer)),
-  );
-
-  it.live("reports an unsupported relay with login and version guidance", () =>
-    Effect.gen(function* () {
-      const binaryPath = yield* makeMockCloudCli("ws://127.0.0.1:1", { unsupported: true });
-      const snapshot = yield* checkDevinCloudCliProviderStatus(
-        decodeCloudCliSettings({ enabled: true, binaryPath }),
-      );
-      expect(snapshot.status).toBe("error");
-      expect(snapshot.installed).toBe(true);
-      expect(snapshot.message).toContain("auth login");
-      expect(snapshot.message).toContain("acp --cloud");
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-  );
-
-  it.live("does not attempt relay startup after a failed version check", () =>
-    Effect.gen(function* () {
-      const binaryPath = yield* makeMockCloudCli("ws://127.0.0.1:1", { versionFailure: true });
-      const snapshot = yield* checkDevinCloudCliProviderStatus(
-        decodeCloudCliSettings({ enabled: true, binaryPath }),
-      );
-      expect(snapshot.status).toBe("error");
-      expect(snapshot.message).toContain("checking its version");
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-  );
-});
-
-describe("buildDevinCloudAcpWebSocketUrl", () => {
-  it("converts https API URLs to wss /acp/live with the token query", () => {
-    expect(
-      buildDevinCloudAcpWebSocketUrl({ token: "abc123", apiUrl: "https://api.devin.ai" }),
-    ).toBe("wss://api.devin.ai/acp/live?token=abc123");
-  });
-
-  it("converts http API URLs to ws", () => {
-    expect(buildDevinCloudAcpWebSocketUrl({ token: "t", apiUrl: "http://localhost:8080" })).toBe(
-      "ws://localhost:8080/acp/live?token=t",
-    );
-  });
-
-  it("URL-encodes token characters", () => {
-    expect(buildDevinCloudAcpWebSocketUrl({ token: "a/b+c", apiUrl: "https://api.devin.ai" })).toBe(
-      "wss://api.devin.ai/acp/live?token=a%2Fb%2Bc",
-    );
-  });
 });
