@@ -91,6 +91,29 @@ describe("Devin Cloud CLI settings", () => {
   });
 });
 
+describe("Devin Cloud organization settings", () => {
+  it.each(["devinCloud", "devinCloudCli"] as const)(
+    "round-trips organization IDs and accepts legacy %s settings without an override",
+    (driver) => {
+      const settings = decodeServerSettings({
+        providers: { [driver]: { organizationId: " org-selected " } },
+      });
+      expect(encodeServerSettings(settings).providers?.[driver]).toHaveProperty(
+        "organizationId",
+        "org-selected",
+      );
+      expect(
+        decodeServerSettingsPatch({ providers: { [driver]: { organizationId: "org-other" } } })
+          .providers?.[driver],
+      ).toHaveProperty("organizationId", "org-other");
+      expect(decodeServerSettings({}).providers?.[driver]).not.toHaveProperty("organizationId");
+      expect(() =>
+        decodeServerSettings({ providers: { [driver]: { organizationId: " " } } }),
+      ).toThrow();
+    },
+  );
+});
+
 describe("custom model settings", () => {
   const capabilities = {
     optionDescriptors: [
