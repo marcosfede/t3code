@@ -17,6 +17,8 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
+import * as AcpSchema from "effect-acp/schema";
 import { HttpClient } from "effect/unstable/http";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import * as EffectAcpClient from "effect-acp/client";
@@ -77,33 +79,59 @@ function devinCloudModels(
 export const makeDevinCloudModelDiscovery = Effect.fn("makeDevinCloudModelDiscovery")(function* (
   customModels: DevinCloudSettings["customModels"],
 ) {
-  const models = yield* SubscriptionRef.make<ReadonlyArray<ServerProviderModel> | undefined>(
-    undefined,
-  );
+  const catalog = yield* SubscriptionRef.make<{
+    readonly models?: ReadonlyArray<ServerProviderModel>;
+    readonly organizations?: ServerProvider["organizations"];
+  }>({});
   const onSessionSetup = (
     setup: Parameters<typeof buildDevinDiscoveredModelsFromSessionSetup>[0],
   ) => {
-    if (!findDevinModelConfigOption(setup)) return Effect.void;
-    return SubscriptionRef.set(models, buildDevinDiscoveredModelsFromSessionSetup(setup));
+    const modelOption = findDevinModelConfigOption(setup);
+    const orgOption = setup.configOptions?.find((option) => option.id === "org_id");
+    return SubscriptionRef.update(catalog, (previous) => ({
+      ...previous,
+      ...(modelOption ? { models: buildDevinDiscoveredModelsFromSessionSetup(setup) } : {}),
+      ...(orgOption?.type === "select"
+        ? {
+            organizations: orgOption.options
+              .flatMap((entry) => ("group" in entry ? entry.options : [entry]))
+              .filter((option) => option.value.trim().length > 0)
+              .map((option) => ({
+                id: option.value.trim(),
+                name: option.name.trim() || option.value.trim(),
+              })),
+          }
+        : {}),
+    }));
   };
   const applyModels = (snapshot: ServerProvider) =>
-    SubscriptionRef.get(models).pipe(
-      Effect.map((discovered) =>
-        discovered === undefined
-          ? snapshot
-          : {
-              ...snapshot,
+    SubscriptionRef.get(catalog).pipe(
+      Effect.map((discovered) => ({
+        ...snapshot,
+        ...(discovered.organizations ? { organizations: discovered.organizations } : {}),
+        ...(discovered.models
+          ? {
               models: providerModelsFromSettings(
-                discovered.length > 0 ? discovered : DEFAULT_CLOUD_MODELS,
+                discovered.models.length > 0 ? discovered.models : DEFAULT_CLOUD_MODELS,
                 customModels,
                 EMPTY_CAPABILITIES,
               ),
-            },
-      ),
+            }
+          : {}),
+      })),
     );
 
   return {
     onSessionSetup,
+    discover: Effect.fn("DevinCloudModelDiscovery.discover")(function* (
+      runtime: AcpSessionRuntime["Service"],
+    ) {
+      yield* runtime.initialize();
+      const setup = yield* runtime
+        .request("session/new", { cwd: process.cwd(), mcpServers: [] })
+        .pipe(Effect.flatMap(Schema.decodeUnknownEffect(AcpSchema.NewSessionResponse)));
+      yield* onSessionSetup(setup);
+    }),
     observeRuntime: (runtime: AcpSessionRuntime["Service"]): AcpSessionRuntime["Service"] => ({
       ...runtime,
       start: () =>
@@ -127,7 +155,7 @@ export const makeDevinCloudModelDiscovery = Effect.fn("makeDevinCloudModelDiscov
         refresh: source.refresh.pipe(Effect.flatMap(applyModels)),
         streamChanges: Stream.merge(
           source.streamChanges.pipe(Stream.mapEffect(applyModels)),
-          SubscriptionRef.changes(models).pipe(Stream.mapEffect(() => getSnapshot)),
+          SubscriptionRef.changes(catalog).pipe(Stream.mapEffect(() => getSnapshot)),
         ).pipe(Stream.changesWith((previous, next) => Equal.equals(previous, next))),
       };
     },
