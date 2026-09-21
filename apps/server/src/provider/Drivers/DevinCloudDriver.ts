@@ -86,6 +86,8 @@ export const DevinCloudDriver: ProviderDriver<DevinCloudSettings, DevinCloudDriv
   defaultConfig: (): DevinCloudSettings => decodeDevinCloudSettings({}),
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
+      const crypto = yield* Crypto.Crypto;
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const fileSystem = yield* FileSystem.FileSystem;
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
@@ -109,7 +111,13 @@ export const DevinCloudDriver: ProviderDriver<DevinCloudSettings, DevinCloudDriv
           Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.mapError((cause) => new EffectAcpErrors.AcpSpawnError({ cause })),
           Effect.flatMap((credentials) =>
-            makeDevinCloudAcpRuntime({ ...runtimeInput, credentials }),
+            makeDevinCloudAcpRuntime({
+              ...runtimeInput,
+              credentials,
+              ...(effectiveConfig.organizationId
+                ? { organizationId: effectiveConfig.organizationId }
+                : {}),
+            }),
           ),
           Effect.map(modelDiscovery.observeRuntime),
         );
@@ -169,6 +177,30 @@ export const DevinCloudDriver: ProviderDriver<DevinCloudSettings, DevinCloudDriv
         snapshot: modelDiscovery.decorate(snapshot),
         adapter,
         textGeneration,
+        refreshModels: () =>
+          Effect.gen(function* () {
+            const runtime = yield* makeAcpRuntime({
+              childProcessSpawner: spawner,
+              cwd: process.cwd(),
+              clientInfo: { name: "t3-code-provider-settings", version: "0.0.0" },
+            });
+            yield* modelDiscovery.discover(runtime);
+          }).pipe(
+            Effect.scoped,
+            Effect.timeout("30 seconds"),
+            Effect.catchCause((cause) =>
+              Effect.fail(
+                new ProviderDriverError({
+                  driver: DRIVER_KIND,
+                  instanceId,
+                  detail:
+                    "Could not load Devin Cloud organizations. Check the provider sign-in and try again.",
+                  cause,
+                }),
+              ),
+            ),
+            Effect.provideService(Crypto.Crypto, crypto),
+          ),
       } satisfies ProviderInstance;
     }),
 };

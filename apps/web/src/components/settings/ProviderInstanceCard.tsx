@@ -396,6 +396,8 @@ interface ProviderInstanceCardProps {
   readonly onRunUpdate?: (() => void) | undefined;
   readonly onInstallRecommended?: (() => void) | undefined;
   readonly isUpdating?: boolean | undefined;
+  readonly onLoadOrganizations?: (() => void) | undefined;
+  readonly isLoadingOrganizations?: boolean | undefined;
 }
 
 /**
@@ -439,6 +441,8 @@ export function ProviderInstanceCard({
   onRunUpdate,
   onInstallRecommended,
   isUpdating = false,
+  onLoadOrganizations,
+  isLoadingOrganizations,
 }: ProviderInstanceCardProps) {
   const enabled = resolveProviderInstanceEnabled(instance);
   const compatibility = enabled ? liveProvider?.compatibilityAdvisory : undefined;
@@ -919,6 +923,9 @@ export function ProviderInstanceCard({
             value={instance.config}
             idPrefix={`provider-instance-${instanceId}`}
             variant="settings"
+            organizations={liveProvider?.organizations}
+            onLoadOrganizations={enabled ? onLoadOrganizations : undefined}
+            isLoadingOrganizations={isLoadingOrganizations}
             onChange={updateConfig}
           />
         ) : (

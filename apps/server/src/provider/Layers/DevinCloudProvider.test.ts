@@ -179,7 +179,33 @@ describe("makeDevinCloudModelDiscovery", () => {
       }
       const emitted = yield* Stream.runHead(provider.streamChanges);
       expect(Option.getOrThrow(emitted).models[0]?.slug).toBe("session-model");
+      yield* discovery.onSessionSetup({
+        configOptions: [
+          {
+            id: "org_id",
+            name: "Organization",
+            type: "select",
+            currentValue: "org-work",
+            options: [
+              {
+                group: "account",
+                name: "Account",
+                options: [
+                  { value: "org-work", name: "Work" },
+                  { value: "org-personal", name: "Personal" },
+                ],
+              },
+            ],
+          },
+        ],
+      });
+      const organizations = [
+        { id: "org-work", name: "Work" },
+        { id: "org-personal", name: "Personal" },
+      ];
+      expect(yield* provider.refresh).toHaveProperty("organizations", organizations);
       yield* discovery.onSessionSetup({ configOptions: [] });
+      expect(yield* provider.getSnapshot).toHaveProperty("organizations", organizations);
       expect((yield* provider.getSnapshot).models[0]?.slug).toBe("session-model");
       yield* discovery.onSessionSetup({
         configOptions: [

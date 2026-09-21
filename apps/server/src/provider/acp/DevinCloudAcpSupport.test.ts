@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeModule from "node:module";
 import * as Path from "effect/Path";
 import { describe, expect, it } from "@effect/vitest";
+import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -21,12 +22,18 @@ import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import {
   ApprovalRequestId,
   DevinCloudCliSettings,
+  DevinCloudSettings,
+  ProviderInstanceId,
   ProviderDriverKind,
   ThreadId,
   type ProviderRuntimeEvent,
 } from "@t3tools/contracts";
 import { ServerConfig } from "../../config.ts";
 import { makeDevinAdapter } from "../Layers/DevinAdapter.ts";
+import {
+  buildInitialDevinCloudProviderSnapshot,
+  makeDevinCloudModelDiscovery,
+} from "../Layers/DevinCloudProvider.ts";
 import type { AcpToolCallState } from "./AcpRuntimeModel.ts";
 import { makeDevinCloudCliAcpRuntime } from "./DevinCloudCliAcpSupport.ts";
 import type { DevinAcpRuntimeFactory, DevinAcpRuntimeFactoryInput } from "./DevinAcpSupport.ts";
@@ -41,6 +48,8 @@ import {
   loadDevinCloudCredentials,
   makeDevinCloudAcpRuntime,
 } from "./DevinCloudAcpSupport.ts";
+
+const decodeCloudSettings = Schema.decodeSync(DevinCloudSettings);
 
 const CREDENTIALS_TOML = `
 schema_version = "1.0"
@@ -239,6 +248,7 @@ const makeCloudTransportServer = (
   onLoad?: (socket: WebSocket, request: ReturnType<typeof decodeRequest>) => boolean | void,
   transport: "websocket" | "cli" = "websocket",
   autoStart = true,
+  onRequest?: (socket: WebSocket, request: ReturnType<typeof decodeRequest>) => boolean | void,
 ) =>
   Effect.gen(function* () {
     const connections = yield* Queue.unbounded<WebSocket>();
@@ -265,6 +275,7 @@ const makeCloudTransportServer = (
           return;
         }
         requests.push(request);
+        if (onRequest?.(socket, request) === false) return;
         let result: unknown;
         switch (request.method) {
           case "initialize":
@@ -316,11 +327,15 @@ const makeCloudTransportServer = (
           ? Queue.offer(failedLoads, undefined).pipe(Effect.asVoid)
           : Effect.void,
     };
-    const makeRuntime: DevinAcpRuntimeFactory = (input) =>
+    const makeRuntime = (input: Parameters<DevinAcpRuntimeFactory>[0], organizationId?: string) =>
       binaryPath
-        ? makeDevinCloudCliAcpRuntime({ ...input, settings: { binaryPath } })
+        ? makeDevinCloudCliAcpRuntime({
+            ...input,
+            settings: { binaryPath, ...(organizationId ? { organizationId } : {}) },
+          })
         : makeDevinCloudAcpRuntime({
             ...input,
+            ...(organizationId ? { organizationId } : {}),
             credentials: { apiUrl: `http://127.0.0.1:${address.port}`, token: "test" },
           });
     const runtime = yield* makeRuntime(runtimeInput).pipe(
@@ -363,6 +378,188 @@ const makeCloudTransportServer = (
       toolCalls,
     };
   });
+
+describe.each(["websocket", "cli"] as const)(
+  "Devin Cloud organization selection (%s)",
+  (transport) => {
+    const makeCloudServer = (
+      onLoad?: Parameters<typeof makeCloudTransportServer>[0],
+      onRequest?: Parameters<typeof makeCloudTransportServer>[3],
+    ) => makeCloudTransportServer(onLoad, transport, true, onRequest);
+
+    it.live(
+      "discovers organizations without prompting or applying an invalid saved organization",
+      () =>
+        Effect.gen(function* () {
+          const server = yield* makeCloudServer(undefined, (socket, request) => {
+            if (request.method !== "session/new") return;
+            socket.send(
+              encodeJson({
+                jsonrpc: "2.0",
+                id: request.id,
+                result: {
+                  sessionId,
+                  configOptions: [
+                    {
+                      id: "org_id",
+                      name: "Organization",
+                      type: "select",
+                      currentValue: "org-work",
+                      options: [
+                        { value: "org-work", name: "Work" },
+                        { value: "org-personal", name: "Personal" },
+                      ],
+                    },
+                  ],
+                },
+              }),
+            );
+            return false;
+          });
+          const discovery = yield* makeDevinCloudModelDiscovery([]);
+          const initial = {
+            ...(yield* buildInitialDevinCloudProviderSnapshot(decodeCloudSettings({}))),
+            instanceId: ProviderInstanceId.make("test-cloud"),
+            driver: ProviderDriverKind.make("devinCloud"),
+          };
+          const provider = discovery.decorate({
+            getSnapshot: Effect.succeed(initial),
+            refresh: Effect.succeed(initial),
+            streamChanges: Stream.never,
+            resolveMaintenance: () => Effect.die("not used"),
+            applyUsageLimits: () => Effect.void,
+          });
+          const runtime = yield* server.makeRuntime(
+            {
+              childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
+              cwd: process.cwd(),
+              clientInfo: { name: "test", version: "1" },
+            },
+            "org-no-longer-accessible",
+          );
+          yield* discovery.discover(runtime);
+          expect(yield* provider.getSnapshot).toHaveProperty("organizations", [
+            { id: "org-work", name: "Work" },
+            { id: "org-personal", name: "Personal" },
+          ]);
+          expect(
+            server.requests.some(
+              (request) =>
+                request.method === "session/prompt" ||
+                request.method === "session/set_config_option",
+            ),
+          ).toBe(false);
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+
+    it.live(
+      "selects the organization before prompting and preserves it across reconnect and resume",
+      () =>
+        Effect.gen(function* () {
+          const configOptions = [
+            {
+              id: "org_id",
+              name: "Organization",
+              type: "select" as const,
+              currentValue: "org-selected",
+              options: [{ value: "org-selected", name: "Selected organization" }],
+            },
+          ];
+          const server = yield* makeCloudServer(undefined, (socket, request) => {
+            if (request.method !== "session/set_config_option") return;
+            socket.send(
+              encodeJson({
+                jsonrpc: "2.0",
+                id: request.id,
+                result: {
+                  configOptions,
+                  _meta: { "cognition.ai/httpUploadUrl": "https://example.com/selected" },
+                },
+              }),
+            );
+            return false;
+          });
+          const input = {
+            childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
+            cwd: process.cwd(),
+            clientInfo: { name: "test", version: "1" },
+          };
+          const runtime = yield* server.makeRuntime(input, "org-selected");
+          yield* Stream.runForEach(runtime.getEvents(), (event) =>
+            event._tag === "EventStreamBarrier"
+              ? Deferred.succeed(event.acknowledge, undefined)
+              : Effect.void,
+          ).pipe(Effect.forkScoped);
+          const started = yield* runtime.start();
+          expect(started.sessionSetupResult.configOptions).toEqual(configOptions);
+          expect(started.sessionSetupResult._meta?.["cognition.ai/httpUploadUrl"]).toBe(
+            "https://example.com/selected",
+          );
+          yield* runtime.start();
+          const prompt = yield* runtime
+            .prompt({ prompt: [{ type: "text", text: "Work" }] })
+            .pipe(Effect.forkScoped);
+          const socket = yield* Queue.take(server.prompts);
+          const selection = server.requests.findIndex(
+            (request) => request.method === "session/set_config_option",
+          );
+          expect(server.requests[selection]?.params).toEqual({
+            sessionId,
+            configId: "org_id",
+            value: "org-selected",
+          });
+          expect(selection).toBeLessThan(
+            server.requests.findIndex((request) => request.method === "session/prompt"),
+          );
+          socket.terminate();
+          const replacement = yield* Queue.take(server.loads);
+          sendUpdate(replacement, statusUpdate("finished"));
+          yield* Fiber.join(prompt);
+          const resumed = yield* server.makeRuntime(
+            { ...input, resumeSessionId: sessionId },
+            "org-other",
+          );
+          yield* resumed.start();
+          expect(
+            server.requests.filter((request) => request.method === "session/set_config_option"),
+          ).toHaveLength(1);
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+
+    it.live("does not send a prompt when organization selection is rejected", () =>
+      Effect.gen(function* () {
+        const server = yield* makeCloudServer(undefined, (socket, request) => {
+          if (request.method !== "session/set_config_option") return;
+          socket.send(
+            encodeJson({
+              jsonrpc: "2.0",
+              id: request.id,
+              error: { code: -32602, message: "Invalid org_id" },
+            }),
+          );
+          return false;
+        });
+        const runtime = yield* server.makeRuntime(
+          {
+            childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
+            cwd: process.cwd(),
+            clientInfo: { name: "test", version: "1" },
+          },
+          "org-unavailable",
+        );
+        const started = yield* runtime.start().pipe(Effect.exit);
+        expect(Exit.isFailure(started)).toBe(true);
+        if (Exit.isFailure(started))
+          expect(Cause.pretty(started.cause)).toContain("Invalid org_id");
+        const prompted = yield* runtime
+          .prompt({ prompt: [{ type: "text", text: "Must not run" }] })
+          .pipe(Effect.exit);
+        expect(Exit.isFailure(prompted)).toBe(true);
+        expect(server.requests.some((request) => request.method === "session/prompt")).toBe(false);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+  },
+);
 
 describe.each(["websocket", "cli"] as const)("Devin Cloud import (%s)", (transport) => {
   const makeCloudServer = (onLoad?: Parameters<typeof makeCloudTransportServer>[0]) =>
