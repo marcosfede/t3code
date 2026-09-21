@@ -411,7 +411,9 @@ export const make = (
     const enrichProcessExitWithStderr = (
       error: EffectAcpErrors.AcpError,
     ): Effect.Effect<EffectAcpErrors.AcpError> =>
-      error._tag !== "AcpProcessExitedError" || (error.stderr?.trim().length ?? 0) > 0
+      options.spawn === undefined ||
+      error._tag !== "AcpProcessExitedError" ||
+      (error.stderr?.trim().length ?? 0) > 0
         ? Effect.succeed(error)
         : Deferred.await(stderrDrained).pipe(
             Effect.timeout("250 millis"),
@@ -445,7 +447,7 @@ export const make = (
       if (!firstTermination) {
         return;
       }
-      yield* Deferred.fail(terminationDeferred, error);
+      yield* Deferred.fail(terminationDeferred, enriched);
       yield* closeActiveAssistantSegment({ queue: eventQueue, assistantSegmentRef });
       yield* Queue.offer(eventQueue, { _tag: "ConnectionTerminated", error: enriched });
     });
@@ -537,7 +539,9 @@ export const make = (
           Stream.runForEach((chunk) =>
             Ref.update(stderrTailRef, (current) => appendAcpStderrTail(current, chunk)).pipe(
               Effect.andThen(
-                options.onStderr ? options.onStderr(chunk.slice(-maxStderrChunkLength)) : Effect.void,
+                options.onStderr
+                  ? options.onStderr(chunk.slice(-maxStderrChunkLength))
+                  : Effect.void,
               ),
               Effect.catch((error) =>
                 Effect.gen(function* () {
