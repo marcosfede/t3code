@@ -536,7 +536,7 @@ importers:
         version: 3.6.0
       ws:
         specifier: ^8.21.0
-        version: 8.21.0(bufferutil@4.1.0)(utf-8-validate@6.0.6)
+        version: 8.21.3(bufferutil@4.1.0)(utf-8-validate@6.0.6)
       yaml:
         specifier: ^2.9.0
         version: 2.9.0
