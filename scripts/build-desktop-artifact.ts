@@ -2689,7 +2689,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     const path = yield* Path.Path;
     const repoRoot = yield* RepoRoot;
     const selfSignedIdentity = signed
-      ? (yield* Config.string("T3CODE_MACOS_SELF_SIGN_IDENTITY").pipe(
+      ? (yield* Config.String("T3CODE_MACOS_SELF_SIGN_IDENTITY").pipe(
           Config.withDefault(""),
         )).trim()
       : "";
