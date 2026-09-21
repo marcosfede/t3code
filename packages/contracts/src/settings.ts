@@ -855,6 +855,18 @@ export const DevinCloudSettings = makeProviderSettingsSchema(
       Schema.withDecodingDefault(Effect.succeed(true)),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
+    organizationId: Schema.optionalKey(TrimmedNonEmptyString).pipe(
+      Schema.annotateKey({
+        title: "Organization",
+        description:
+          "Organization for new Devin Cloud sessions. Existing sessions keep their organization.",
+        providerSettingsForm: {
+          control: "select",
+          options: [{ value: "", label: "Default organization" }],
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
     credentialsPath: Schema.optionalKey(TrimmedNonEmptyString).pipe(
       Schema.annotateKey({
         title: "Credentials path",
@@ -872,7 +884,7 @@ export const DevinCloudSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["credentialsPath"],
+    order: ["organizationId", "credentialsPath"],
   },
 );
 export type DevinCloudSettings = typeof DevinCloudSettings.Type;
@@ -880,6 +892,7 @@ export type DevinCloudSettings = typeof DevinCloudSettings.Type;
 export const DevinCloudCliSettings = makeProviderSettingsSchema(
   {
     ...DevinSettings.fields,
+    organizationId: DevinCloudSettings.fields.organizationId,
     enabled: Schema.Boolean.pipe(
       Schema.withDecodingDefault(Effect.succeed(false)),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
@@ -892,7 +905,7 @@ export const DevinCloudCliSettings = makeProviderSettingsSchema(
       }),
     ),
   },
-  { order: ["binaryPath"] },
+  { order: ["organizationId", "binaryPath"] },
 );
 export type DevinCloudCliSettings = typeof DevinCloudCliSettings.Type;
 
@@ -1472,6 +1485,7 @@ const DevinSettingsPatch = Schema.Struct({
 
 const DevinCloudSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
+  organizationId: Schema.optionalKey(TrimmedNonEmptyString),
   credentialsPath: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
 });
@@ -1585,7 +1599,12 @@ export const ServerSettingsPatch = Schema.Struct({
       grok: Schema.optionalKey(GrokSettingsPatch),
       devin: Schema.optionalKey(DevinSettingsPatch),
       devinCloud: Schema.optionalKey(DevinCloudSettingsPatch),
-      devinCloudCli: Schema.optionalKey(DevinSettingsPatch),
+      devinCloudCli: Schema.optionalKey(
+        Schema.Struct({
+          ...DevinSettingsPatch.fields,
+          organizationId: Schema.optionalKey(TrimmedNonEmptyString),
+        }),
+      ),
       opencode: Schema.optionalKey(OpenCodeSettingsPatch),
       antigravity: Schema.optionalKey(AntigravitySettingsPatch),
     }),

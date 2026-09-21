@@ -627,26 +627,34 @@ export function EnvironmentProviderSettings({
         )
       : null;
 
-  const refreshProviders = useCallback(() => {
-    if (refreshingRef.current) return;
-    refreshingRef.current = true;
-    setIsRefreshingProviders(true);
-    void (async () => {
-      const result = await refreshServerProviders({
-        environmentId,
-        input: { refreshModels: true },
-      });
-      refreshingRef.current = false;
-      setIsRefreshingProviders(false);
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        console.warn("Failed to refresh providers", {
-          operation: "refresh-providers",
+  const refreshProviders = useCallback(
+    (instanceId?: ProviderInstanceId) => {
+      if (refreshingRef.current) return;
+      refreshingRef.current = true;
+      setIsRefreshingProviders(true);
+      void (async () => {
+        const result = await refreshServerProviders({
           environmentId,
-          ...safeErrorLogAttributes(squashAtomCommandFailure(result)),
+          input: { refreshModels: true, ...(instanceId ? { instanceId } : {}) },
         });
-      }
-    })();
-  }, [environmentId, refreshServerProviders]);
+        refreshingRef.current = false;
+        setIsRefreshingProviders(false);
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          toastManager.add({
+            type: "error",
+            title: "Could not refresh provider choices",
+            description: "Check the provider sign-in and try again.",
+          });
+          console.warn("Failed to refresh providers", {
+            operation: "refresh-providers",
+            environmentId,
+            ...safeErrorLogAttributes(squashAtomCommandFailure(result)),
+          });
+        }
+      })();
+    },
+    [environmentId, refreshServerProviders],
+  );
 
   const runProviderUpdate = useCallback(
     async (candidate: ProviderSettingsUpdateCandidate) => {
@@ -908,6 +916,8 @@ export function EnvironmentProviderSettings({
         instance={row.instance}
         driverOption={driverOption}
         liveProvider={liveProvider}
+        onLoadOrganizations={() => refreshProviders(row.instanceId)}
+        isLoadingOrganizations={isRefreshingProviders}
         mode={mode}
         selected={mode === "list" && selectedRow?.instanceId === row.instanceId}
         onSelect={mode === "list" ? () => setSelectedInstanceId(row.instanceId) : undefined}
