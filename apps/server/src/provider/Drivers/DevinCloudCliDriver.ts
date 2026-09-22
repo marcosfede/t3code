@@ -1,13 +1,16 @@
 import { DevinCloudCliSettings, ProviderDriverKind, type ServerProvider } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { makeDevinCloudTextGeneration } from "../../textGeneration/DevinCloudTextGeneration.ts";
 import { ProviderDriverError } from "../Errors.ts";
+import { causeErrorTag } from "@t3tools/shared/observability";
 import { makeDevinAdapter } from "../Layers/DevinAdapter.ts";
 import { checkDevinCloudCliProviderStatus } from "../Layers/DevinCloudCliProvider.ts";
 import {
@@ -129,6 +132,47 @@ export const DevinCloudCliDriver: ProviderDriver<DevinCloudCliSettings, DevinClo
             }),
         ),
       );
+      const discoverOrganizations = Effect.gen(function* () {
+        const runtime = yield* makeAcpRuntime({
+          settings: effectiveConfig,
+          environment: processEnv,
+          childProcessSpawner: spawner,
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-code-provider-settings", version: "0.0.0" },
+        });
+        yield* modelDiscovery.discover(runtime);
+      }).pipe(Effect.scoped, Effect.timeout("30 seconds"));
+
+      const decoratedSnapshot = modelDiscovery.decorate(snapshot);
+      // Discover the org list eagerly once the provider is ready so fresh
+      // threads see the selector without a session or a Settings refresh.
+      // `session/new` on `devin acp --cloud` is a draft, not a listed session.
+      const discoveryInFlight = yield* Ref.make(false);
+      yield* Stream.runForEach(
+        Stream.concat(
+          Stream.fromEffect(decoratedSnapshot.getSnapshot),
+          decoratedSnapshot.streamChanges,
+        ),
+        (next) =>
+          Effect.gen(function* () {
+            if (next.status !== "ready" || (yield* modelDiscovery.hasOrganizations)) {
+              return;
+            }
+            const shouldRun = yield* Ref.modify(discoveryInFlight, (inFlight) => [!inFlight, true]);
+            if (!shouldRun) {
+              return;
+            }
+            yield* discoverOrganizations.pipe(
+              Effect.ensuring(Ref.set(discoveryInFlight, false)),
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Devin Cloud organization discovery failed", {
+                  errorTag: causeErrorTag(cause),
+                }),
+              ),
+            );
+          }),
+      ).pipe(Effect.forkScoped);
+
       return {
         instanceId,
         driverKind: DRIVER_KIND,
@@ -136,22 +180,11 @@ export const DevinCloudCliDriver: ProviderDriver<DevinCloudCliSettings, DevinClo
         displayName,
         accentColor,
         enabled,
-        snapshot: modelDiscovery.decorate(snapshot),
+        snapshot: decoratedSnapshot,
         adapter,
         textGeneration: makeDevinCloudTextGeneration(),
         refreshModels: () =>
-          Effect.gen(function* () {
-            const runtime = yield* makeAcpRuntime({
-              settings: effectiveConfig,
-              environment: processEnv,
-              childProcessSpawner: spawner,
-              cwd: process.cwd(),
-              clientInfo: { name: "t3-code-provider-settings", version: "0.0.0" },
-            });
-            yield* modelDiscovery.discover(runtime);
-          }).pipe(
-            Effect.scoped,
-            Effect.timeout("30 seconds"),
+          discoverOrganizations.pipe(
             Effect.catchCause((cause) =>
               Effect.fail(
                 new ProviderDriverError({
