@@ -663,6 +663,9 @@ export function makeDevinAdapter(
             cwd,
             cancelBehavior: "wait-for-prompt",
             ...(resumeSessionId ? { resumeSessionId } : {}),
+            ...(devinModelSelection?.options
+              ? { providerOptions: devinModelSelection.options }
+              : {}),
             ...(history
               ? {
                   onSessionUpdate: (notification: EffectAcpSchema.SessionNotification) =>
