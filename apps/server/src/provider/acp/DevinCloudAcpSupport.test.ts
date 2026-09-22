@@ -34,7 +34,33 @@ import type { DevinAcpRuntimeFactory, DevinAcpRuntimeFactoryInput } from "./Devi
 import type { ProviderSessionHistory } from "../Services/ProviderAdapter.ts";
 import { ProviderAdapterRequestError } from "../Errors.ts";
 
-import { buildDevinCloudAcpSpawnInput, makeDevinCloudAcpRuntime } from "./DevinCloudAcpSupport.ts";
+import {
+  buildDevinCloudAcpSpawnInput,
+  makeDevinCloudAcpRuntime,
+  resolveDevinCloudOrganizationId,
+} from "./DevinCloudAcpSupport.ts";
+
+describe("resolveDevinCloudOrganizationId", () => {
+  it("prefers the thread-level org_id selection over the settings default", () => {
+    expect(
+      resolveDevinCloudOrganizationId([{ id: "org_id", value: "org-thread" }], "org-settings"),
+    ).toBe("org-thread");
+  });
+
+  it("falls back to the settings default for missing or blank selections", () => {
+    expect(resolveDevinCloudOrganizationId(undefined, "org-settings")).toBe("org-settings");
+    expect(resolveDevinCloudOrganizationId([{ id: "org_id", value: " " }], "org-settings")).toBe(
+      "org-settings",
+    );
+    expect(resolveDevinCloudOrganizationId([{ id: "other", value: "x" }], "org-settings")).toBe(
+      "org-settings",
+    );
+  });
+
+  it("returns undefined when nothing is selected or configured", () => {
+    expect(resolveDevinCloudOrganizationId(undefined, undefined)).toBeUndefined();
+  });
+});
 
 const decodeCloudSettings = Schema.decodeSync(DevinCloudSettings);
 
@@ -318,7 +344,7 @@ describe.each(["primary", "cli"] as const)(
             );
             return false;
           });
-          const discovery = yield* makeDevinCloudModelDiscovery([]);
+          const discovery = yield* makeDevinCloudModelDiscovery([], undefined);
           const initial = {
             ...(yield* buildInitialDevinCloudProviderSnapshot(decodeCloudSettings({}))),
             instanceId: ProviderInstanceId.make("test-cloud"),

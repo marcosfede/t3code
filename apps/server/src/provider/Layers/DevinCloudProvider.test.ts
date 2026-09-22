@@ -199,7 +199,10 @@ describe("makeDevinCloudModelDiscovery", () => {
         resolveMaintenance: () => Effect.die("not used"),
         applyUsageLimits: () => Effect.void,
       } satisfies ServerProviderShape;
-      const discovery = yield* makeDevinCloudModelDiscovery(settings.customModels);
+      const discovery = yield* makeDevinCloudModelDiscovery(
+        settings.customModels,
+        settings.organizationId,
+      );
       const provider = discovery.decorate(source);
       expect((yield* provider.getSnapshot).models).toEqual(initial.models);
       yield* discovery.onSessionSetup({
@@ -256,7 +259,110 @@ describe("makeDevinCloudModelDiscovery", () => {
           { id: "devin_version", name: "Model", type: "select", currentValue: "", options: [] },
         ],
       });
-      expect((yield* provider.getSnapshot).models).toEqual(initial.models);
+      const fallbackModels = (yield* provider.getSnapshot).models;
+      expect(fallbackModels.map((model) => model.slug)).toEqual(
+        initial.models.map((model) => model.slug),
+      );
+      for (const model of fallbackModels) {
+        expect(
+          model.capabilities?.optionDescriptors?.find((option) => option.id === "org_id"),
+        ).toMatchObject({ type: "select", currentValue: "org-work" });
+      }
+    }),
+  );
+
+  const makeSource = (snapshot: ServerProvider): ServerProviderShape => ({
+    getSnapshot: Effect.succeed(snapshot),
+    refresh: Effect.succeed(snapshot),
+    streamChanges: Stream.never,
+    resolveMaintenance: () => Effect.die("not used"),
+    applyUsageLimits: () => Effect.void,
+  });
+
+  it.effect("adds an Organization selector to every model once a session advertises orgs", () =>
+    Effect.gen(function* () {
+      const settings = decodeSettings({ customModels: ["custom-model"] });
+      const initial: ServerProvider = {
+        ...(yield* buildInitialDevinCloudProviderSnapshot(settings)),
+        instanceId: ProviderInstanceId.make("devinCloud"),
+        driver: ProviderDriverKind.make("devinCloud"),
+      };
+      const discovery = yield* makeDevinCloudModelDiscovery(
+        settings.customModels,
+        settings.organizationId,
+      );
+      const provider = discovery.decorate(makeSource(initial));
+      expect(
+        (yield* provider.getSnapshot).models.every(
+          (model) => !model.capabilities?.optionDescriptors?.length,
+        ),
+      ).toBe(true);
+      yield* discovery.onSessionSetup({
+        configOptions: [
+          {
+            id: "org_id",
+            name: "Organization",
+            type: "select",
+            currentValue: "org-b",
+            options: [
+              { value: "org-a", name: "Cognition" },
+              { value: "org-b", name: "Data Infra" },
+            ],
+          },
+        ],
+      });
+      const snapshot = yield* provider.getSnapshot;
+      expect(snapshot.models.length).toBeGreaterThan(0);
+      for (const model of snapshot.models) {
+        const descriptor = model.capabilities?.optionDescriptors?.find(
+          (option) => option.id === "org_id",
+        );
+        expect(descriptor).toMatchObject({
+          type: "select",
+          label: "Organization",
+          currentValue: "org-b",
+          options: [
+            { id: "org-a", label: "Cognition" },
+            { id: "org-b", label: "Data Infra", isDefault: true },
+          ],
+        });
+      }
+    }),
+  );
+
+  it.effect("defaults the selector to the configured organization when it is known", () =>
+    Effect.gen(function* () {
+      const settings = decodeSettings({ organizationId: "org-a" });
+      const initial: ServerProvider = {
+        ...(yield* buildInitialDevinCloudProviderSnapshot(settings)),
+        instanceId: ProviderInstanceId.make("devinCloud"),
+        driver: ProviderDriverKind.make("devinCloud"),
+      };
+      const discovery = yield* makeDevinCloudModelDiscovery(
+        settings.customModels,
+        settings.organizationId,
+      );
+      const provider = discovery.decorate(makeSource(initial));
+      yield* discovery.onSessionSetup({
+        configOptions: [
+          {
+            id: "org_id",
+            name: "Organization",
+            type: "select",
+            currentValue: "org-b",
+            options: [
+              { value: "org-a", name: "Cognition" },
+              { value: "org-b", name: "Data Infra" },
+            ],
+          },
+        ],
+      });
+      const descriptor = (yield* provider.getSnapshot).models[0]?.capabilities
+        ?.optionDescriptors?.[0];
+      expect(descriptor?.type).toBe("select");
+      if (descriptor?.type !== "select") return;
+      expect(descriptor.currentValue).toBe("org-a");
+      expect(descriptor.options.find((option) => option.isDefault)?.id).toBe("org-a");
     }),
   );
 });

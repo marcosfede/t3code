@@ -34,7 +34,10 @@ import {
   makeProviderSnapshotSettingsSource,
   type ProviderSnapshotSettings,
 } from "../providerUpdateSettings.ts";
-import { makeDevinCloudAcpRuntime } from "../acp/DevinCloudAcpSupport.ts";
+import {
+  makeDevinCloudAcpRuntime,
+  resolveDevinCloudOrganizationId,
+} from "../acp/DevinCloudAcpSupport.ts";
 import { type DevinAcpRuntimeFactory } from "../acp/DevinAcpSupport.ts";
 
 const decodeDevinCloudSettings = Schema.decodeSync(DevinCloudSettings);
@@ -99,17 +102,23 @@ export const DevinCloudDriver: ProviderDriver<DevinCloudSettings, DevinCloudDriv
         continuationGroupKey: continuationIdentity.continuationKey,
       });
       const effectiveConfig = { ...config, enabled } satisfies DevinCloudSettings;
-      const modelDiscovery = yield* makeDevinCloudModelDiscovery(effectiveConfig.customModels);
+      const modelDiscovery = yield* makeDevinCloudModelDiscovery(
+        effectiveConfig.customModels,
+        effectiveConfig.organizationId,
+      );
 
-      const makeAcpRuntime: DevinAcpRuntimeFactory = (runtimeInput) =>
-        makeDevinCloudAcpRuntime({
+      const makeAcpRuntime: DevinAcpRuntimeFactory = (runtimeInput) => {
+        const organizationId = resolveDevinCloudOrganizationId(
+          runtimeInput.providerOptions,
+          effectiveConfig.organizationId,
+        );
+        return makeDevinCloudAcpRuntime({
           ...runtimeInput,
           environment: processEnv,
           cloudSettings: effectiveConfig,
-          ...(effectiveConfig.organizationId
-            ? { organizationId: effectiveConfig.organizationId }
-            : {}),
+          ...(organizationId ? { organizationId } : {}),
         }).pipe(Effect.map(modelDiscovery.observeRuntime));
+      };
 
       const adapter = yield* makeDevinAdapter(null, {
         environment: processEnv,
