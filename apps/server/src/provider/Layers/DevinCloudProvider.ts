@@ -24,6 +24,7 @@ import { createModelCapabilities } from "@t3tools/shared/model";
 import { parseDevinAuthStatus, runDevinCliCommand } from "./DevinProvider.ts";
 
 import {
+  buildSelectOptionDescriptor,
   buildServerProvider,
   isCommandMissingCause,
   parseGenericCliVersion,
@@ -37,6 +38,7 @@ import {
 } from "../providerMaintenance.ts";
 import {
   DEVIN_CLOUD_CREDENTIALS_MIGRATION_MESSAGE,
+  DEVIN_CLOUD_ORGANIZATION_OPTION_ID,
   makeDevinCloudAcpRuntime,
 } from "../acp/DevinCloudAcpSupport.ts";
 import { isConnectionLost } from "../acp/DevinCloudReconnect.ts";
@@ -80,10 +82,12 @@ function devinCloudModels(
 
 export const makeDevinCloudModelDiscovery = Effect.fn("makeDevinCloudModelDiscovery")(function* (
   customModels: DevinCloudSettings["customModels"],
+  settingsOrganizationId: string | undefined,
 ) {
   const catalog = yield* SubscriptionRef.make<{
     readonly models?: ReadonlyArray<ServerProviderModel>;
     readonly organizations?: ServerProvider["organizations"];
+    readonly defaultOrganizationId?: string | undefined;
   }>({});
   const onSessionSetup = (
     setup: Parameters<typeof buildDevinDiscoveredModelsFromSessionSetup>[0],
@@ -95,6 +99,7 @@ export const makeDevinCloudModelDiscovery = Effect.fn("makeDevinCloudModelDiscov
       ...(modelOption ? { models: buildDevinDiscoveredModelsFromSessionSetup(setup) } : {}),
       ...(orgOption?.type === "select"
         ? {
+            defaultOrganizationId: orgOption.currentValue.trim() || undefined,
             organizations: orgOption.options
               .flatMap((entry) => ("group" in entry ? entry.options : [entry]))
               .filter((option) => option.value.trim().length > 0)
@@ -108,19 +113,54 @@ export const makeDevinCloudModelDiscovery = Effect.fn("makeDevinCloudModelDiscov
   };
   const applyModels = (snapshot: ServerProvider) =>
     SubscriptionRef.get(catalog).pipe(
-      Effect.map((discovered) => ({
-        ...snapshot,
-        ...(discovered.organizations ? { organizations: discovered.organizations } : {}),
-        ...(discovered.models
-          ? {
-              models: providerModelsFromSettings(
-                discovered.models.length > 0 ? discovered.models : DEFAULT_CLOUD_MODELS,
-                customModels,
-                EMPTY_CAPABILITIES,
-              ),
-            }
-          : {}),
-      })),
+      Effect.map((discovered) => {
+        const configuredOrganizationId = settingsOrganizationId?.trim();
+        const defaultOrganizationId =
+          configuredOrganizationId &&
+          discovered.organizations?.some((org) => org.id === configuredOrganizationId)
+            ? configuredOrganizationId
+            : discovered.defaultOrganizationId;
+        const organizationDescriptor =
+          discovered.organizations && discovered.organizations.length > 0
+            ? buildSelectOptionDescriptor({
+                id: DEVIN_CLOUD_ORGANIZATION_OPTION_ID,
+                label: "Organization",
+                description:
+                  "Organization that owns new Devin Cloud sessions. Existing threads keep theirs.",
+                options: discovered.organizations.map((org) => ({
+                  value: org.id,
+                  label: org.name,
+                  isDefault: org.id === defaultOrganizationId,
+                })),
+              })
+            : undefined;
+        const models = discovered.models
+          ? providerModelsFromSettings(
+              discovered.models.length > 0 ? discovered.models : DEFAULT_CLOUD_MODELS,
+              customModels,
+              EMPTY_CAPABILITIES,
+            )
+          : snapshot.models;
+        return {
+          ...snapshot,
+          ...(discovered.organizations ? { organizations: discovered.organizations } : {}),
+          ...(discovered.models || organizationDescriptor
+            ? {
+                models: organizationDescriptor
+                  ? models.map((model) => ({
+                      ...model,
+                      capabilities: createModelCapabilities({
+                        optionDescriptors: [
+                          ...(model.capabilities?.optionDescriptors ?? []),
+                          organizationDescriptor,
+                        ],
+                      }),
+                    }))
+                  : models,
+              }
+            : {}),
+        };
+      }),
     );
 
   return {
