@@ -1,4 +1,8 @@
-import { DEVIN_CLOUD_DEFAULT_MODEL, type DevinSettings } from "@t3tools/contracts";
+import {
+  DEVIN_CLOUD_DEFAULT_MODEL,
+  type DevinSettings,
+  type ProviderOptionSelection,
+} from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -19,6 +23,7 @@ interface DevinAcpRuntimeInput extends Omit<
   readonly childProcessSpawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
   readonly devinSettings: DevinAcpRuntimeDevinSettings | null | undefined;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly providerOptions?: ReadonlyArray<ProviderOptionSelection>;
 }
 
 /** Runtime factory input without provider-specific settings; what the shared
