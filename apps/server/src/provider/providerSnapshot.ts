@@ -161,6 +161,7 @@ export function buildSelectOptionDescriptor(input: {
     | undefined;
   readonly description?: string;
   readonly promptInjectedValues?: ReadonlyArray<string>;
+  readonly lockedAfterSessionStart?: boolean;
 }) {
   const options = (input.options ?? []).map((option) => ({
     id: option.value,
@@ -179,6 +180,7 @@ export function buildSelectOptionDescriptor(input: {
     ...(input.promptInjectedValues && input.promptInjectedValues.length > 0
       ? { promptInjectedValues: [...input.promptInjectedValues] }
       : {}),
+    ...(input.lockedAfterSessionStart === true ? { lockedAfterSessionStart: true } : {}),
   };
 }
 
