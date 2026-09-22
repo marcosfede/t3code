@@ -1,4 +1,5 @@
-import { type DevinCloudSettings } from "@t3tools/contracts";
+import { type DevinCloudSettings, type ProviderOptionSelection } from "@t3tools/contracts";
+import { getProviderOptionStringSelectionValue } from "@t3tools/shared/model";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -21,6 +22,21 @@ export function buildDevinCloudAcpSpawnInput(
   environment?: NodeJS.ProcessEnv,
 ): AcpSessionRuntime.AcpSpawnInput {
   return { ...buildDevinAcpSpawnInput(cloudSettings, cwd, environment), args: ["acp", "--cloud"] };
+}
+
+export const DEVIN_CLOUD_ORGANIZATION_OPTION_ID = "org_id";
+
+/** A thread-level Organization selection from the composer wins over the Settings default. */
+export function resolveDevinCloudOrganizationId(
+  providerOptions: ReadonlyArray<ProviderOptionSelection> | null | undefined,
+  settingsOrganizationId: string | undefined,
+): string | undefined {
+  return (
+    getProviderOptionStringSelectionValue(
+      providerOptions,
+      DEVIN_CLOUD_ORGANIZATION_OPTION_ID,
+    )?.trim() || settingsOrganizationId
+  );
 }
 
 export const withDevinCloudOrganization = Effect.fn("withDevinCloudOrganization")(function* (
