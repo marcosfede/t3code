@@ -126,7 +126,8 @@ export const makeDevinCloudModelDiscovery = Effect.fn("makeDevinCloudModelDiscov
                 id: DEVIN_CLOUD_ORGANIZATION_OPTION_ID,
                 label: "Organization",
                 description:
-                  "Organization that owns new Devin Cloud sessions. Existing threads keep theirs.",
+                  "Organization that owns this thread's Devin Cloud session. Fixed once the session starts.",
+                lockedAfterSessionStart: true,
                 options: discovered.organizations.map((org) => ({
                   value: org.id,
                   label: org.name,
@@ -165,6 +166,9 @@ export const makeDevinCloudModelDiscovery = Effect.fn("makeDevinCloudModelDiscov
 
   return {
     onSessionSetup,
+    hasOrganizations: SubscriptionRef.get(catalog).pipe(
+      Effect.map((discovered) => discovered.organizations !== undefined),
+    ),
     discover: Effect.fn("DevinCloudModelDiscovery.discover")(function* (
       runtime: AcpSessionRuntime["Service"],
     ) {

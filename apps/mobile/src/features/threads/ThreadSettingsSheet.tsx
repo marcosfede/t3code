@@ -177,18 +177,11 @@ function ProviderHeader(props: {
 function DisclosureRow(props: {
   readonly label: string;
   readonly value: string | undefined;
-  readonly onPress: () => void;
+  readonly onPress?: () => void;
   readonly isLast?: boolean;
 }) {
-  return (
-    <Pressable
-      accessibilityRole="button"
-      onPress={props.onPress}
-      className={cn(
-        "min-h-11 flex-row items-center gap-2 bg-card px-4 py-2 active:bg-subtle android:min-h-14",
-        !props.isLast && "border-b border-border-subtle",
-      )}
-    >
+  const content = (
+    <>
       <Text className="text-sm font-t3-medium text-foreground">{props.label}</Text>
       <View className="flex-1" />
       {props.value ? (
@@ -196,12 +189,27 @@ function DisclosureRow(props: {
           {props.value}
         </Text>
       ) : null}
-      <SymbolView
-        name="chevron.right"
-        size={12}
-        tintColorClassName="accent-icon-subtle"
-        type="monochrome"
-      />
+      {props.onPress ? (
+        <SymbolView
+          name="chevron.right"
+          size={12}
+          tintColorClassName="accent-icon-subtle"
+          type="monochrome"
+        />
+      ) : null}
+    </>
+  );
+  const rowClassName = cn(
+    "min-h-11 flex-row items-center gap-2 bg-card px-4 py-2 android:min-h-14",
+    props.onPress && "active:bg-subtle",
+    !props.isLast && "border-b border-border-subtle",
+  );
+  if (!props.onPress) {
+    return <View className={rowClassName}>{content}</View>;
+  }
+  return (
+    <Pressable accessibilityRole="button" onPress={props.onPress} className={rowClassName}>
+      {content}
     </Pressable>
   );
 }
@@ -240,6 +248,8 @@ type ThreadSettingsSessionProps = {
   readonly selectedModel: ModelSelection | null;
   readonly onSelectModel: (option: ModelOption) => void;
   readonly optionDescriptors: ReadonlyArray<ProviderOptionDescriptor>;
+  /** Fixed-at-session-start options render read-only once the thread has a session. */
+  readonly threadStarted?: boolean;
   readonly onUpdateOptionSelections: (selections: ReadonlyArray<ProviderOptionSelection>) => void;
   readonly runtimeMode: RuntimeMode;
   readonly onUpdateRuntimeMode: (mode: RuntimeMode) => void;
@@ -295,6 +305,7 @@ type ThreadSettingsSessionValue = {
   readonly toggleFavorite: (option: ModelOption) => void;
   readonly runtimeMode: RuntimeMode;
   readonly onUpdateRuntimeMode: (mode: RuntimeMode) => void;
+  readonly threadStarted?: boolean;
   readonly displayedDescriptors: ReadonlyArray<ProviderOptionDescriptor>;
   readonly providerExpansionOverrides: ReadonlySet<string>;
   readonly hasLegacyModels: boolean;
@@ -451,6 +462,7 @@ function ThreadSettingsSessionProvider(
       providerGroups: props.providerGroups,
       runtimeMode: props.runtimeMode,
       onUpdateRuntimeMode: props.onUpdateRuntimeMode,
+      threadStarted: props.threadStarted,
       displayedDescriptors,
       favoriteKeys,
       favoritesLoaded,
@@ -489,6 +501,7 @@ function ThreadSettingsSessionProvider(
       props.onUpdateRuntimeMode,
       props.providerGroups,
       props.runtimeMode,
+      props.threadStarted,
       searchQuery,
       showLegacyToggle,
       toggleProvider,
@@ -709,7 +722,12 @@ function ThreadSettingsOptionsItem(props: {
                 <DisclosureRow
                   label={descriptor.label}
                   value={getProviderOptionCurrentLabel(descriptor)}
-                  onPress={() => props.onOpenSubmenu({ kind: "descriptor", id: descriptor.id })}
+                  {...(descriptor.lockedAfterSessionStart === true && session.threadStarted
+                    ? {}
+                    : {
+                        onPress: () =>
+                          props.onOpenSubmenu({ kind: "descriptor", id: descriptor.id }),
+                      })}
                 />
               </Animated.View>
             );

@@ -321,6 +321,7 @@ describe("makeDevinCloudModelDiscovery", () => {
           type: "select",
           label: "Organization",
           currentValue: "org-b",
+          lockedAfterSessionStart: true,
           options: [
             { id: "org-a", label: "Cognition" },
             { id: "org-b", label: "Data Infra", isDefault: true },

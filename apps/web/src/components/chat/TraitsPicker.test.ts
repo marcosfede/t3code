@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 import { ProviderDriverKind, type ProviderOptionDescriptor } from "@t3tools/contracts";
-import { buildTraitsTriggerDisplay, buildUnavailableModelOptionDescriptors } from "./TraitsPicker";
+import {
+  buildTraitsTriggerDisplay,
+  buildUnavailableModelOptionDescriptors,
+  isDescriptorLocked,
+} from "./TraitsPicker";
 
 function selectDescriptor(
   id: string,
@@ -153,6 +157,20 @@ describe("buildTraitsTriggerDisplay", () => {
         ultrathinkPromptControlled: true,
       }),
     ).toEqual({ label: "Ultrathink", showFastModeIcon: true });
+  });
+});
+
+describe("isDescriptorLocked", () => {
+  const LOCKED = {
+    ...selectDescriptor("org_id", [{ id: "org-a", label: "Cognition" }], "org-a"),
+    lockedAfterSessionStart: true,
+  } satisfies Extract<ProviderOptionDescriptor, { type: "select" }>;
+
+  it("locks a lockedAfterSessionStart select only once the thread has started", () => {
+    expect(isDescriptorLocked(LOCKED, true)).toBe(true);
+    expect(isDescriptorLocked(LOCKED, false)).toBe(false);
+    expect(isDescriptorLocked(EFFORT, true)).toBe(false);
+    expect(isDescriptorLocked(fastModeDescriptor(true), true)).toBe(false);
   });
 });
 
