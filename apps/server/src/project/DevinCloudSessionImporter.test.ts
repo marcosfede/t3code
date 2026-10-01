@@ -159,6 +159,53 @@ describe("DevinCloudSessionImporter", () => {
     }).pipe(Effect.provide(integrationLayer)),
   );
 
+  it.effect("imports a local Devin session only when its instance is named", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness;
+      const localDriver = ProviderDriverKind.make("devin");
+      harness.setProviders(
+        harness.providers.map((provider) => ({ ...provider, driver: localDriver })),
+      );
+      const failure = yield* harness
+        .importer({ projectId, session: "shrub-griffin" })
+        .pipe(Effect.flip);
+      expect(failure.message).toContain("Devin Cloud provider");
+      expect(harness.starts).toEqual([]);
+      const result = yield* harness.importer({
+        projectId,
+        session: "shrub-griffin",
+        providerInstanceId: instanceId,
+      });
+      expect(harness.starts[0]).toMatchObject({
+        provider: localDriver,
+        resumeCursor: { sessionId: "shrub-griffin" },
+      });
+      expect(Option.getOrThrow(yield* harness.directory.getBinding(result.threadId))).toMatchObject(
+        { provider: localDriver, providerInstanceId: instanceId },
+      );
+    }).pipe(Effect.provide(integrationLayer)),
+  );
+
+  it.effect("lands fresh imports in the active list and leaves existing threads as they are", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness;
+      const { threadId } = yield* harness.importer({ projectId, session: "old-session" });
+      const settledOverride = Effect.map(
+        harness.snapshots.getThreadDetailById(threadId),
+        (thread) => Option.getOrThrow(thread).settledOverride,
+      );
+      expect(yield* settledOverride).toBe("active");
+      yield* harness.engine.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make("settle-imported-thread"),
+        threadId,
+      });
+      expect(yield* harness.importer({ projectId, session: "old-session" })).toEqual({ threadId });
+      expect(yield* settledOverride).toBe("settled");
+      expect(harness.starts).toHaveLength(1);
+    }).pipe(Effect.provide(integrationLayer)),
+  );
+
   it.effect("does not resurrect a deleted imported thread", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness;
@@ -207,10 +254,11 @@ describe("DevinCloudSessionImporter", () => {
       });
       expect(yield* harness.importer({ projectId, session: "cloud-session" })).toEqual({
         threadId,
+        archived: true,
       });
       expect(
-        Option.getOrThrow(yield* harness.snapshots.getThreadDetailById(threadId)).archivedAt,
-      ).toBeNull();
+        Option.getOrThrow(yield* harness.snapshots.getThreadLifecycleById(threadId)).archivedAt,
+      ).not.toBeNull();
       expect(harness.starts).toHaveLength(1);
     }).pipe(Effect.provide(integrationLayer)),
   );

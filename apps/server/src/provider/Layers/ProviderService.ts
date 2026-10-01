@@ -2243,6 +2243,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const getInstanceInfo: ProviderServiceMethod<"getInstanceInfo"> = (instanceId) =>
     registry.getInstanceInfo(instanceId);
 
+  const listNativeSessions: ProviderServiceMethod<"listNativeSessions"> = (instanceId) =>
+    registry
+      .getByInstance(instanceId)
+      .pipe(Effect.flatMap((adapter) => adapter.listNativeSessions?.() ?? Effect.succeed([])));
+
   const assertConversationRollbackSupported: ProviderServiceMethod<"assertConversationRollbackSupported"> =
     Effect.fn("assertConversationRollbackSupported")(function* (threadId) {
       const routed = yield* resolveRoutableSession({
@@ -2471,6 +2476,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     listSessions,
     getCapabilities,
     getInstanceInfo,
+    listNativeSessions,
     assertConversationRollbackSupported,
     rollbackConversation,
     uploadFeedback,

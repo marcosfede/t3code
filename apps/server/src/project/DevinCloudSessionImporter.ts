@@ -24,6 +24,7 @@ import { ProviderService } from "../provider/Services/ProviderService.ts";
 import { ProviderSessionDirectory } from "../provider/Services/ProviderSessionDirectory.ts";
 
 const isImportError = Schema.is(DevinCloudSessionImportError);
+const CLOUD_DRIVERS = new Set(["devinCloud", "devinCloudCli"]);
 
 export const makeDevinCloudSessionImporter = Effect.gen(function* () {
   const engine = yield* OrchestrationEngineService;
@@ -37,24 +38,30 @@ export const makeDevinCloudSessionImporter = Effect.gen(function* () {
 
   return Effect.fn("importDevinCloudSession")(
     function* (input: DevinCloudSessionImportInput) {
-      return yield* lock.withPermit(
+      const result = yield* lock.withPermit(
         Effect.gen(function* () {
           const sessionId = parseDevinCloudSessionId(input.session);
           if (!sessionId)
             return yield* new DevinCloudSessionImportError({
               detail: "Paste a Devin session URL or session ID.",
             });
+          // Local Devin sessions are only importable when the caller names the instance;
+          // pasted URLs and IDs default to Devin Cloud.
           const candidates = (yield* registry.getProviders).filter(
             (instance) =>
-              (instance.driver === "devinCloud" || instance.driver === "devinCloudCli") &&
               instance.enabled &&
-              (input.providerInstanceId === undefined ||
-                input.providerInstanceId === instance.instanceId),
+              (input.providerInstanceId === undefined
+                ? CLOUD_DRIVERS.has(instance.driver)
+                : input.providerInstanceId === instance.instanceId &&
+                  (instance.driver === "devin" || CLOUD_DRIVERS.has(instance.driver))),
           );
           const instance = candidates[0];
           if (!instance)
             return yield* new DevinCloudSessionImportError({
-              detail: "Enable a Devin Cloud provider in Settings → Providers first.",
+              detail:
+                input.providerInstanceId === undefined
+                  ? "Enable a Devin Cloud provider in Settings → Providers first."
+                  : "Enable this Devin provider in Settings → Providers first.",
             });
           if (candidates.length > 1)
             return yield* new DevinCloudSessionImportError({
@@ -81,19 +88,13 @@ export const makeDevinCloudSessionImporter = Effect.gen(function* () {
                 detail: "This session belongs to a deleted T3 thread.",
               });
             }
-            if (row.value.archivedAt !== null) {
-              yield* engine.dispatch({
-                type: "thread.unarchive",
-                commandId: yield* commandId,
-                threadId,
-              });
-              return { threadId };
-            }
+            // A session already in T3 is left exactly as the user last left it.
+            if (row.value.archivedAt !== null) return { threadId, archived: true, imported: false };
           }
           const existing = yield* snapshots.getThreadDetailById(threadId);
           if (Option.isSome(existing)) {
             if (existing.value.messages.length > 0 || existing.value.session !== null)
-              return { threadId };
+              return { threadId, imported: false };
             if (existing.value.projectId !== input.projectId) {
               return yield* new DevinCloudSessionImportError({
                 detail: "This session is already being imported into another project.",
@@ -144,7 +145,9 @@ export const makeDevinCloudSessionImporter = Effect.gen(function* () {
                       title: (
                         history.title?.trim() ||
                         history.messages.find((message) => message.role === "user")?.text.trim() ||
-                        "Devin Cloud session"
+                        (CLOUD_DRIVERS.has(instance.driver)
+                          ? "Devin Cloud session"
+                          : "Devin session")
                       ).slice(0, 200),
                       modelSelection,
                       runtimeMode: DEFAULT_RUNTIME_MODE,
@@ -180,9 +183,19 @@ export const makeDevinCloudSessionImporter = Effect.gen(function* () {
                 ),
             },
           );
-          return { threadId };
+          return { threadId, imported: true };
         }),
       );
+      const { imported, ...outcome } = result;
+      // A fresh import lands in the active list even when its history is old enough to auto-settle.
+      if (imported)
+        yield* engine.dispatch({
+          type: "thread.unsettle",
+          commandId: yield* commandId,
+          threadId: outcome.threadId,
+          reason: "user",
+        });
+      return outcome;
     },
     Effect.mapError((cause) =>
       isImportError(cause) ? cause : new DevinCloudSessionImportError({ detail: cause.message }),

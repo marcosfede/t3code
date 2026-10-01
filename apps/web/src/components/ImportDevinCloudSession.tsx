@@ -1,5 +1,4 @@
 import { useAtomValue } from "@effect/atom-react";
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { parseDevinCloudSessionId, type ProviderInstanceId } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
@@ -10,9 +9,9 @@ import { devinCloudSessionImport } from "../state/agentSessions";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import { primaryServerKeybindingsAtom, primaryServerProvidersAtom } from "../state/server";
 import { useAtomCommand } from "../state/use-atom-command";
-import { buildThreadRouteParams } from "../threadRoutes";
 import type { Project } from "../types";
 import { CommandPaletteContent } from "./CommandPaletteContent";
+import { focusDevinImport } from "./devinSessions/focusDevinImport";
 import { CommandPaletteResults } from "./CommandPaletteResults";
 import { ITEM_ICON_CLASS, type CommandPaletteActionItem } from "./CommandPalette.logic";
 
@@ -83,12 +82,7 @@ export function ImportDevinCloudSession(props: {
         setError(failure instanceof Error ? failure.message : "Could not import the session.");
         return;
       }
-      await navigate({
-        to: "/$environmentId/$threadId",
-        params: buildThreadRouteParams(
-          scopeThreadRef(project.environmentId, result.value.threadId),
-        ),
-      });
+      await focusDevinImport(navigate, project.environmentId, result.value);
       props.onClose();
     } catch (failure) {
       if (mounted.current)

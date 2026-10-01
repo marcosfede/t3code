@@ -176,7 +176,14 @@ import { resolveEnvironmentOptionLabel } from "./BranchToolbar.logic";
 import { CommandPaletteContent } from "./CommandPaletteContent";
 import { ImportDevinCloudSession } from "./ImportDevinCloudSession";
 import { CommandPaletteResults } from "./CommandPaletteResults";
-import { AzureDevOpsIcon, BitbucketIcon, GitHubIcon, GitLabIcon, ForgejoIcon } from "./Icons";
+import {
+  AzureDevOpsIcon,
+  BitbucketIcon,
+  DevinIcon,
+  GitHubIcon,
+  GitLabIcon,
+  ForgejoIcon,
+} from "./Icons";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { Checkbox } from "./ui/checkbox";
 import { ProjectFavicon } from "./ProjectFavicon";
@@ -2239,6 +2246,29 @@ function OpenCommandPaletteDialog(props: {
       icon: <PullRequestGlyph.pullRequest className={ITEM_ICON_CLASS} />,
       run: async () => {
         await navigate({ to: "/pull-requests", search: readPullRequestListPreferences() });
+      },
+    });
+  }
+
+  if (
+    environments.some((environment) =>
+      environment.serverConfig?.providers.some(
+        (provider) =>
+          provider.enabled &&
+          (provider.driver === "devin" ||
+            provider.driver === "devinCloud" ||
+            provider.driver === "devinCloudCli"),
+      ),
+    )
+  ) {
+    actionItems.push({
+      kind: "action",
+      value: "action:devin-sessions",
+      searchTerms: ["devin", "sessions", "cloud", "local", "import", "open"],
+      title: "Open Devin sessions",
+      icon: <DevinIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        await navigate({ to: "/devin-sessions" });
       },
     });
   }

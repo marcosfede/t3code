@@ -23,6 +23,7 @@ const state = vi.hoisted(() => ({
 }));
 vi.mock("../state/use-atom-command", () => ({ useAtomCommand: () => state.importSession }));
 vi.mock("../state/agentSessions", () => ({ devinCloudSessionImport: {} }));
+vi.mock("../state/entities", () => ({ waitForThreadShell: () => Promise.resolve() }));
 vi.mock("../state/server", () => ({
   primaryServerProvidersAtom: state.providersAtom,
   primaryServerKeybindingsAtom: Symbol("keybindings"),

@@ -67,6 +67,7 @@ import { makeDevinThinkingPreview, makeDevinToolNormalizer } from "../acp/DevinA
 import { resolveDevinConcreteModelId } from "../acp/DevinModelCatalog.ts";
 import { makeDevinReferenceNormalizer } from "../acp/DevinReferences.ts";
 import { makeDevinCloudHistory, devinCloudSessionState } from "../acp/DevinCloudHistory.ts";
+import { listDevinAcpSessions } from "../acp/DevinSessionList.ts";
 import { type DevinAdapterShape } from "../Services/DevinAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 
@@ -638,16 +639,16 @@ export function makeDevinAdapter(
           const resume = parseDevinResume(input.resumeCursor);
           const resumeSessionId = resume?.sessionId;
           const imported = isCloud && (hooks !== undefined || resume?.imported === true);
-          if (hooks && (!isCloud || !resumeSessionId)) {
+          if (hooks && !resumeSessionId) {
             return yield* new ProviderAdapterValidationError({
               provider,
               operation: "importSession",
-              issue: "A Devin Cloud session ID is required.",
+              issue: "A Devin session ID is required.",
             });
           }
           let history =
             hooks && resumeSessionId
-              ? makeDevinCloudHistory(resumeSessionId, yield* nowIso)
+              ? makeDevinCloudHistory(resumeSessionId, yield* nowIso, { cloud: isCloud })
               : undefined;
           let collectingHistory = history !== undefined;
           const acpNativeLoggers = makeAcpNativeLoggers({
@@ -1776,11 +1777,34 @@ export function makeDevinAdapter(
 
     const streamEvents = Stream.fromPubSub(runtimeEventPubSub);
 
+    const listNativeSessions: NonNullable<DevinAdapterShape["listNativeSessions"]> = () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const acp = yield* makeAcpRuntime({
+            ...(options?.environment ? { environment: options.environment } : {}),
+            childProcessSpawner,
+            cwd: serverConfig.cwd,
+            clientInfo: { name: "t3-code", version: "0.0.0" },
+          }).pipe(Effect.provideService(Crypto.Crypto, crypto));
+          return yield* listDevinAcpSessions(acp);
+        }),
+      ).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapterRequestError({
+              provider,
+              method: "session/list",
+              detail: cause.message,
+              cause,
+            }),
+        ),
+      );
+
     return {
       provider: provider,
       capabilities: {
         sessionModelSwitch: "in-session",
-        ...(isCloud ? { supportsSessionImport: true } : {}),
+        supportsSessionImport: true,
       },
       startSession,
       sendTurn,
@@ -1791,6 +1815,7 @@ export function makeDevinAdapter(
       respondToUserInput,
       stopSession,
       listSessions,
+      listNativeSessions,
       hasSession,
       stopAll,
       streamEvents,
