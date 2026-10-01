@@ -108,13 +108,44 @@ describe("supportedDevinModelIdsFromSessionSetup", () => {
   });
 });
 
+const traitConfigOptions = (input: { readonly thoughtLevel: string; readonly speed?: string }) =>
+  [
+    {
+      type: "select",
+      id: "thought_level",
+      name: "Thinking",
+      category: "thought_level",
+      currentValue: input.thoughtLevel,
+      options: ["low", "medium", "high", "max"].map((value) => ({ value, name: value })),
+    },
+    ...(input.speed
+      ? [
+          {
+            type: "select",
+            id: "speed",
+            name: "Speed",
+            category: "model_config",
+            currentValue: input.speed,
+            options: [
+              { value: "standard", name: "Standard" },
+              { value: "fast", name: "Fast" },
+            ],
+          },
+        ]
+      : []),
+  ] as unknown as ReadonlyArray<EffectAcpSchema.SessionConfigOption>;
+
 describe("applyDevinAcpModelSelection", () => {
-  const makeRecordingRuntime = (failure?: EffectAcpErrors.AcpError) => {
+  const makeRecordingRuntime = (
+    failure?: EffectAcpErrors.AcpError,
+    configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption> = [],
+  ) => {
     const modelCalls: Array<string> = [];
     const configOptionCalls: Array<readonly [string, string | boolean]> = [];
     const record = (): Effect.Effect<void, EffectAcpErrors.AcpError> =>
       failure ? Effect.fail(failure) : Effect.void;
     const runtime = {
+      getConfigOptions: Effect.sync(() => configOptions),
       setModel: (model: string) =>
         Effect.suspend(() => {
           modelCalls.push(model);
@@ -244,6 +275,59 @@ describe("applyDevinAcpModelSelection", () => {
       }
       expect(modelCalls).toEqual([]);
       expect(configOptionCalls).toEqual([]);
+    }),
+  );
+
+  it.effect("applies reasoning and fast mode through the model's config options", () =>
+    Effect.gen(function* () {
+      const { runtime, modelCalls, configOptionCalls } = makeRecordingRuntime(
+        undefined,
+        traitConfigOptions({ thoughtLevel: "medium", speed: "standard" }),
+      );
+      const result = yield* applyDevinAcpModelSelection({
+        runtime,
+        currentModelId: "gpt-6-sol-medium",
+        requestedModelId: "claude-opus-5-5-medium",
+        options: [
+          { id: "reasoning", value: "high" },
+          { id: "fastMode", value: true },
+        ],
+        mapError: (cause) => cause.message,
+      });
+      expect(result).toBe("claude-opus-5-5-medium");
+      expect(modelCalls).toEqual(["claude-opus-5-5-medium"]);
+      expect(configOptionCalls).toEqual([
+        ["thought_level", "high"],
+        ["speed", "fast"],
+      ]);
+    }),
+  );
+
+  it.effect("applies options without a model switch and skips unchanged or unoffered values", () =>
+    Effect.gen(function* () {
+      const { runtime, modelCalls, configOptionCalls } = makeRecordingRuntime(
+        undefined,
+        traitConfigOptions({ thoughtLevel: "high", speed: "fast" }),
+      );
+      yield* applyDevinAcpModelSelection({
+        runtime,
+        currentModelId: "claude-opus-5-5-medium",
+        requestedModelId: "claude-opus-5-5-medium",
+        options: [
+          { id: "reasoning", value: "high" },
+          { id: "fastMode", value: false },
+        ],
+        mapError: (cause) => cause.message,
+      });
+      yield* applyDevinAcpModelSelection({
+        runtime,
+        currentModelId: "claude-opus-5-5-medium",
+        requestedModelId: undefined,
+        options: [{ id: "reasoning", value: "xhigh" }],
+        mapError: (cause) => cause.message,
+      });
+      expect(modelCalls).toEqual([]);
+      expect(configOptionCalls).toEqual([["speed", "standard"]]);
     }),
   );
 

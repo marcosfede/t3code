@@ -5,10 +5,14 @@ import {
   type ServerProviderAuth,
   type ServerProviderModel,
 } from "@t3tools/contracts";
+import type * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import { causeErrorTag } from "@t3tools/shared/observability";
+import * as Arr from "effect/Array";
+import * as Cache from "effect/Cache";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
@@ -32,8 +36,11 @@ import {
 } from "../providerMaintenance.ts";
 import { findDevinModelConfigOption, makeDevinAcpRuntime } from "../acp/DevinAcpSupport.ts";
 import {
+  buildDevinConfigOptionDescriptors,
   buildDevinFamilyOptionDescriptors,
   buildDevinModelFamilies,
+  devinFamilyProbeModelId,
+  mergeDevinOptionDescriptors,
 } from "../acp/DevinModelCatalog.ts";
 
 const DEVIN_PRESENTATION = {
@@ -49,6 +56,8 @@ const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
 const VERSION_PROBE_TIMEOUT_MS = 4_000;
 const AUTH_PROBE_TIMEOUT_MS = 4_000;
 const DEVIN_ACP_MODEL_DISCOVERY_TIMEOUT_MS = 15_000;
+const DEVIN_MODEL_OPTIONS_PROBE_TIMEOUT_MS = 30_000;
+const DEVIN_MODEL_OPTIONS_PROBE_PROCESSES = 6;
 
 const DEVIN_BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
   {
@@ -113,33 +122,70 @@ function flattenSessionConfigSelectOptions(
   return options.flatMap((entry) => ("group" in entry ? entry.options : [entry]));
 }
 
-export function buildDevinDiscoveredModelsFromSessionSetup(
-  sessionSetupResult:
-    | EffectAcpSchema.LoadSessionResponse
-    | EffectAcpSchema.NewSessionResponse
-    | EffectAcpSchema.ResumeSessionResponse,
-): ReadonlyArray<ServerProviderModel> {
+type DevinSessionSetupResult =
+  | EffectAcpSchema.LoadSessionResponse
+  | EffectAcpSchema.NewSessionResponse
+  | EffectAcpSchema.ResumeSessionResponse;
+
+/** Config options each model reports once it is the session's active model. */
+export type DevinConfigOptionsByModel = ReadonlyMap<
+  string,
+  ReadonlyArray<EffectAcpSchema.SessionConfigOption>
+>;
+
+function devinModelCatalogFromSessionSetup(sessionSetupResult: DevinSessionSetupResult) {
   const modelOption = findDevinModelConfigOption(sessionSetupResult);
   if (!modelOption || modelOption.type !== "select") {
+    return undefined;
+  }
+  return {
+    families: buildDevinModelFamilies(flattenSessionConfigSelectOptions(modelOption.options)),
+    currentValue:
+      typeof modelOption.currentValue === "string" ? modelOption.currentValue.trim() : undefined,
+  };
+}
+
+/** Model ids whose options must be probed: one per family, minus the active model, whose
+ * options the session setup already reports. */
+export function devinModelIdsToProbe(
+  sessionSetupResult: DevinSessionSetupResult,
+): ReadonlyArray<string> {
+  const catalog = devinModelCatalogFromSessionSetup(sessionSetupResult);
+  return (catalog?.families ?? [])
+    .map((family) => devinFamilyProbeModelId(family, catalog?.currentValue))
+    .filter((modelId) => modelId !== catalog?.currentValue);
+}
+
+export function buildDevinDiscoveredModelsFromSessionSetup(
+  sessionSetupResult: DevinSessionSetupResult,
+  probedConfigOptions: DevinConfigOptionsByModel = new Map(),
+): ReadonlyArray<ServerProviderModel> {
+  const catalog = devinModelCatalogFromSessionSetup(sessionSetupResult);
+  if (!catalog) {
     return [];
   }
-  const rawOptions = flattenSessionConfigSelectOptions(modelOption.options);
-  const currentValue =
-    typeof modelOption.currentValue === "string" ? modelOption.currentValue.trim() : undefined;
-  const families = buildDevinModelFamilies(rawOptions);
+  const { families, currentValue } = catalog;
 
   return families.map((family): ServerProviderModel => {
     const isFlat = family.variants.length === 1;
     const isDefault =
       currentValue !== undefined &&
       family.variants.some((variant) => variant.slug === currentValue);
+    const probeModelId = devinFamilyProbeModelId(family, currentValue);
 
-    const descriptors = isFlat
-      ? []
-      : buildDevinFamilyOptionDescriptors({
-          family,
-          sessionCurrentValue: currentValue,
-        });
+    const descriptors = mergeDevinOptionDescriptors(
+      isFlat
+        ? []
+        : buildDevinFamilyOptionDescriptors({
+            family,
+            sessionCurrentValue: currentValue,
+          }),
+      buildDevinConfigOptionDescriptors(
+        (probeModelId === currentValue
+          ? sessionSetupResult.configOptions
+          : probedConfigOptions.get(probeModelId)) ?? [],
+      ),
+    );
 
     const capabilities =
       descriptors.length > 0
@@ -157,10 +203,7 @@ export function buildDevinDiscoveredModelsFromSessionSetup(
   });
 }
 
-const discoverDevinModelsViaAcp = (
-  devinSettings: DevinSettings,
-  environment: NodeJS.ProcessEnv = process.env,
-) =>
+const startDevinDiscoveryRuntime = (devinSettings: DevinSettings, environment: NodeJS.ProcessEnv) =>
   Effect.gen(function* () {
     const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const acp = yield* makeDevinAcpRuntime({
@@ -171,8 +214,74 @@ const discoverDevinModelsViaAcp = (
       clientInfo: { name: "t3-code", version: "0.0.0" },
     });
     const started = yield* acp.start();
-    return buildDevinDiscoveredModelsFromSessionSetup(started.sessionSetupResult);
-  }).pipe(Effect.scoped);
+    return { acp, sessionSetupResult: started.sessionSetupResult };
+  });
+
+const discoverDevinModelsViaAcp = (
+  devinSettings: DevinSettings,
+  environment: NodeJS.ProcessEnv = process.env,
+) =>
+  startDevinDiscoveryRuntime(devinSettings, environment).pipe(
+    Effect.map(({ sessionSetupResult }) => sessionSetupResult),
+    Effect.scoped,
+  );
+
+/**
+ * Devin reports reasoning and speed options only for the session's active model, so each
+ * model's options come from switching a throwaway session to it. A switch takes ~200ms, so
+ * the ids are split across a few `devin acp` processes; models that fail to switch are skipped.
+ */
+const probeDevinModelConfigOptions = (
+  devinSettings: DevinSettings,
+  environment: NodeJS.ProcessEnv,
+  modelIds: ReadonlyArray<string>,
+) =>
+  Effect.forEach(
+    Arr.split(modelIds, DEVIN_MODEL_OPTIONS_PROBE_PROCESSES),
+    (chunk) =>
+      Effect.gen(function* () {
+        const { acp } = yield* startDevinDiscoveryRuntime(devinSettings, environment);
+        return yield* Effect.forEach(chunk, (modelId) =>
+          acp.setModel(modelId).pipe(
+            Effect.andThen(acp.getConfigOptions),
+            Effect.map((configOptions) => [modelId, configOptions] as const),
+            Effect.option,
+          ),
+        );
+      }).pipe(Effect.scoped),
+    { concurrency: "unbounded" },
+  ).pipe(
+    Effect.map(
+      (chunks): DevinConfigOptionsByModel => new Map(chunks.flat().flatMap(Option.toArray)),
+    ),
+  );
+
+export type DevinModelConfigOptionsProbe = (input: {
+  readonly version: string | null;
+  readonly modelIds: ReadonlyArray<string>;
+}) => Effect.Effect<DevinConfigOptionsByModel, EffectAcpErrors.AcpError>;
+
+/** Per-instance probe cache: options only change with the CLI version or the model list. */
+export const makeDevinModelConfigOptionsProbe = Effect.fn("makeDevinModelConfigOptionsProbe")(
+  function* (devinSettings: DevinSettings, environment: NodeJS.ProcessEnv = process.env) {
+    const cache = yield* Cache.makeWith(
+      (key: string) =>
+        probeDevinModelConfigOptions(
+          devinSettings,
+          environment,
+          (JSON.parse(key) as [string | null, ReadonlyArray<string>])[1],
+        ),
+      {
+        capacity: 1,
+        timeToLive: (exit) =>
+          Exit.isSuccess(exit) && exit.value.size > 0 ? Duration.minutes(30) : Duration.zero,
+      },
+    );
+    const probe: DevinModelConfigOptionsProbe = ({ version, modelIds }) =>
+      Cache.get(cache, JSON.stringify([version, modelIds]));
+    return probe;
+  },
+);
 
 export const runDevinCliCommand = (
   devinSettings: Pick<DevinSettings, "binaryPath">,
@@ -211,6 +320,7 @@ export function parseDevinAuthStatus(output: string): ServerProviderAuth {
 export const checkDevinProviderStatus = Effect.fn("checkDevinProviderStatus")(function* (
   devinSettings: DevinSettings,
   environment: NodeJS.ProcessEnv = process.env,
+  probeModelConfigOptions?: DevinModelConfigOptionsProbe,
 ): Effect.fn.Return<
   ServerProviderDraft,
   never,
@@ -368,7 +478,24 @@ export const checkDevinProviderStatus = Effect.fn("checkDevinProviderStatus")(fu
       },
     });
   }
-  const discoveredModels = discoveryExit.value.value;
+  const sessionSetupResult = discoveryExit.value.value;
+  const modelIdsToProbe = probeModelConfigOptions ? devinModelIdsToProbe(sessionSetupResult) : [];
+  const probedConfigOptions =
+    probeModelConfigOptions && modelIdsToProbe.length > 0
+      ? yield* probeModelConfigOptions({ version, modelIds: modelIdsToProbe }).pipe(
+          Effect.timeoutOption(DEVIN_MODEL_OPTIONS_PROBE_TIMEOUT_MS),
+          Effect.map(Option.getOrUndefined),
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Devin model option probe failed", {
+              errorTag: causeErrorTag(cause),
+            }).pipe(Effect.as(undefined)),
+          ),
+        )
+      : undefined;
+  const discoveredModels = buildDevinDiscoveredModelsFromSessionSetup(
+    sessionSetupResult,
+    probedConfigOptions,
+  );
   const models =
     discoveredModels.length > 0
       ? devinModelsFromSettings(devinSettings.customModels, discoveredModels)

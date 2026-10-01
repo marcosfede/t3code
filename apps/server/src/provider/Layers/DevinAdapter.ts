@@ -821,6 +821,7 @@ export function makeDevinAdapter(
             runtime: acp,
             currentModelId: currentDevinModelIdFromSessionSetup(started.sessionSetupResult),
             requestedModelId: requestedStartModelId,
+            options: devinModelSelection?.options,
             supportedModelIds,
             modelConfigOptionId,
             mapError: (cause) =>
@@ -1173,6 +1174,7 @@ export function makeDevinAdapter(
                 runtime: ctx.acp,
                 currentModelId: ctx.currentModelId,
                 requestedModelId: requestedTurnModelId,
+                options: turnModelSelection?.options,
                 supportedModelIds: ctx.supportedModelIds,
                 modelConfigOptionId: ctx.modelConfigOptionId,
                 mapError: (cause) =>
