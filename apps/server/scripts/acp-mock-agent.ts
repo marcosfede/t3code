@@ -1043,7 +1043,7 @@ const program = Effect.gen(function* () {
       }
 
       if (emitInterleavedAssistantToolCalls) {
-        const toolCallId = "tool-call-1";
+        const toolCallId = `tool-call-${promptCount}`;
 
         yield* agent.client.sessionUpdate({
           sessionId: requestedSessionId,
