@@ -156,7 +156,6 @@ export function ImportDevinCloudSession(props: {
             ? "Choose a Devin Cloud provider"
             : "Paste Devin session URL or ID",
         disabled: pending,
-        wrapperClassName: "[&_[data-slot=autocomplete-start-addon]]:pointer-events-auto",
         startAddon: (
           <button
             type="button"
