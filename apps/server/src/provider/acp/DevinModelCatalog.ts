@@ -3,6 +3,7 @@ import {
   getProviderOptionBooleanSelectionValue,
   getProviderOptionStringSelectionValue,
 } from "@t3tools/shared/model";
+import type * as EffectAcpSchema from "effect-acp/schema";
 
 import { buildBooleanOptionDescriptor, buildSelectOptionDescriptor } from "../providerSnapshot.ts";
 
@@ -318,6 +319,116 @@ export function buildDevinFamilyOptionDescriptors(input: {
     );
   }
   return descriptors;
+}
+
+/** Session config option to read for a family's picker options: the active variant when it
+ * belongs to the family, otherwise the first one. */
+export function devinFamilyProbeModelId(family: DevinModelFamily, currentValue?: string): string {
+  return family.variants.find((v) => v.slug === currentValue)?.slug ?? family.variants[0]!.slug;
+}
+
+const selectEntries = (option: EffectAcpSchema.SessionConfigOption | undefined) =>
+  option?.type === "select"
+    ? option.options.flatMap((entry) => ("group" in entry ? entry.options : [entry]))
+    : [];
+
+/** Newer Devin CLIs list one id per model and expose reasoning and speed as session config
+ * options scoped to the active model (`thought_level`, `speed`). */
+function findDevinTraitConfigOptions(
+  configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption>,
+) {
+  const selects = configOptions.filter((option) => option.type === "select");
+  return {
+    reasoning: selects.find((option) => option.category === "thought_level"),
+    speed: selects.find((option) => option.id === "speed"),
+  };
+}
+
+/** Picker descriptors for the active model's `thought_level` and `speed` config options, using
+ * the same ids as slug-encoded variants so stored selections keep their meaning. */
+export function buildDevinConfigOptionDescriptors(
+  configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption>,
+): ReadonlyArray<ProviderOptionDescriptor> {
+  const { reasoning, speed } = findDevinTraitConfigOptions(configOptions);
+  const descriptors: Array<ProviderOptionDescriptor> = [];
+  const reasoningEntries = selectEntries(reasoning);
+  if (reasoningEntries.length > 1) {
+    descriptors.push(
+      buildSelectOptionDescriptor({
+        id: "reasoning",
+        label: "Reasoning",
+        options: reasoningEntries.map((entry) => ({
+          value: entry.value,
+          label: isEffort(entry.value) ? EFFORT_LABELS[entry.value] : entry.name,
+          ...(entry.value === reasoning?.currentValue ? { isDefault: true } : {}),
+        })),
+      }),
+    );
+  }
+  const speedEntries = selectEntries(speed);
+  const speedValues = new Set(speedEntries.map((entry) => entry.value));
+  if (speedValues.size === 2 && speedValues.has("standard") && speedValues.has("fast")) {
+    descriptors.push(
+      buildBooleanOptionDescriptor({
+        id: "fastMode",
+        label: "Fast Mode",
+        currentValue: speed?.currentValue === "fast",
+      }),
+    );
+  } else if (speedEntries.length > 1) {
+    descriptors.push(
+      buildSelectOptionDescriptor({
+        id: "speed",
+        label: "Speed",
+        options: speedEntries.map((entry) => ({
+          value: entry.value,
+          label: entry.name,
+          ...(entry.value === speed?.currentValue ? { isDefault: true } : {}),
+        })),
+      }),
+    );
+  }
+  return descriptors;
+}
+
+const descriptorAxis = (id: string) => (id === "fastMode" ? "speed" : id);
+
+/** Adds config-option descriptors for axes the family's slug variants do not already encode. */
+export function mergeDevinOptionDescriptors(
+  slugDescriptors: ReadonlyArray<ProviderOptionDescriptor>,
+  configDescriptors: ReadonlyArray<ProviderOptionDescriptor>,
+): ReadonlyArray<ProviderOptionDescriptor> {
+  const axes = new Set(slugDescriptors.map((descriptor) => descriptorAxis(descriptor.id)));
+  return [
+    ...slugDescriptors,
+    ...configDescriptors.filter((descriptor) => !axes.has(descriptorAxis(descriptor.id))),
+  ];
+}
+
+/** `session/set_config_option` calls that bring the active model's reasoning and speed in line
+ * with the picker selection. Values the model does not offer and unselected axes are left alone. */
+export function resolveDevinConfigOptionUpdates(
+  configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption>,
+  selections: ReadonlyArray<ProviderOptionSelection> | null | undefined,
+): ReadonlyArray<{ readonly configId: string; readonly value: string }> {
+  const { reasoning, speed } = findDevinTraitConfigOptions(configOptions);
+  const fastMode = getProviderOptionBooleanSelectionValue(selections, "fastMode");
+  const requested = [
+    [reasoning, getProviderOptionStringSelectionValue(selections, "reasoning")],
+    [
+      speed,
+      getProviderOptionStringSelectionValue(selections, "speed") ??
+        (fastMode === undefined ? undefined : fastMode ? "fast" : "standard"),
+    ],
+  ] as const;
+  return requested.flatMap(([option, value]) =>
+    option &&
+    value &&
+    value !== option.currentValue &&
+    selectEntries(option).some((entry) => entry.value === value)
+      ? [{ configId: option.id, value }]
+      : [],
+  );
 }
 
 /**

@@ -11,6 +11,7 @@ import {
   buildDevinDiscoveredModelsFromSessionSetup,
   buildInitialDevinProviderSnapshot,
   checkDevinProviderStatus,
+  devinModelIdsToProbe,
   parseDevinAuthStatus,
 } from "./DevinProvider.ts";
 
@@ -68,6 +69,98 @@ describe("buildDevinDiscoveredModelsFromSessionSetup", () => {
         type: "boolean",
         currentValue: true,
       },
+    ]);
+  });
+
+  it("builds reasoning and speed options from per-model config options", () => {
+    const thoughtLevel = (currentValue: string, values: ReadonlyArray<string>) => ({
+      type: "select",
+      id: "thought_level",
+      name: "Thinking",
+      category: "thought_level",
+      currentValue,
+      options: values.map((value) => ({ value, name: value })),
+    });
+    const speed = (currentValue: string, values: ReadonlyArray<string>) => ({
+      type: "select",
+      id: "speed",
+      name: "Speed",
+      category: "model_config",
+      currentValue,
+      options: values.map((value) => ({ value, name: value[0]!.toUpperCase() + value.slice(1) })),
+    });
+    const setup = {
+      sessionId: "sess-1",
+      configOptions: [
+        {
+          type: "select",
+          id: "model",
+          name: "Model",
+          category: "model",
+          currentValue: "claude-opus-5-5-medium",
+          options: [
+            { name: "Claude Opus 5.5", value: "claude-opus-5-5-medium" },
+            { name: "GPT-6 Astra", value: "gpt-6-astra-medium" },
+            { name: "SWE-1.6 Slow", value: "swe-1-6-slow" },
+          ],
+        },
+        thoughtLevel("high", ["low", "medium", "high", "xhigh", "max"]),
+        speed("fast", ["standard", "fast"]),
+      ],
+    } as unknown as EffectAcpSchema.NewSessionResponse;
+
+    expect(devinModelIdsToProbe(setup)).toEqual(["gpt-6-astra-medium", "swe-1-6-slow"]);
+    const models = buildDevinDiscoveredModelsFromSessionSetup(
+      setup,
+      new Map([
+        [
+          "gpt-6-astra-medium",
+          [
+            thoughtLevel("medium", ["low", "medium"]),
+            speed("standard", ["standard", "fast", "ultrafast"]),
+          ] as unknown as ReadonlyArray<EffectAcpSchema.SessionConfigOption>,
+        ],
+        ["swe-1-6-slow", []],
+      ]),
+    );
+
+    expect(
+      models.map((model) => [model.slug, model.capabilities?.optionDescriptors ?? []]),
+    ).toEqual([
+      [
+        "claude-opus-5-5-medium",
+        [
+          expect.objectContaining({ id: "reasoning", currentValue: "high" }),
+          { id: "fastMode", label: "Fast Mode", type: "boolean", currentValue: true },
+        ],
+      ],
+      [
+        "gpt-6-astra-medium",
+        [
+          {
+            id: "reasoning",
+            label: "Reasoning",
+            type: "select",
+            currentValue: "medium",
+            options: [
+              { id: "low", label: "Low" },
+              { id: "medium", label: "Medium", isDefault: true },
+            ],
+          },
+          {
+            id: "speed",
+            label: "Speed",
+            type: "select",
+            currentValue: "standard",
+            options: [
+              { id: "standard", label: "Standard", isDefault: true },
+              { id: "fast", label: "Fast" },
+              { id: "ultrafast", label: "Ultrafast" },
+            ],
+          },
+        ],
+      ],
+      ["swe-1-6-slow", []],
     ]);
   });
 

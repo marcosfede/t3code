@@ -95,6 +95,7 @@ export const makeDevinTextGeneration = Effect.fn("makeDevinTextGeneration")(func
           runtime,
           currentModelId: currentDevinModelIdFromSessionSetup(started.sessionSetupResult),
           requestedModelId: resolvedModel,
+          options: modelSelection.options,
           supportedModelIds,
           mapError: (cause) =>
             new TextGenerationError({

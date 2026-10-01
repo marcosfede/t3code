@@ -13,6 +13,7 @@ import type * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
 
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
+import { resolveDevinConfigOptionUpdates } from "./DevinModelCatalog.ts";
 
 type DevinAcpRuntimeDevinSettings = Pick<DevinSettings, "binaryPath">;
 
@@ -149,18 +150,21 @@ export function supportedDevinModelIdsFromSessionSetup(
 
 /**
  * Selects the Devin base model through the negotiated `model` config option.
- * No-ops when nothing was requested or the requested model is already active.
+ * Skips the switch when nothing was requested or the requested model is already active.
  * When the session advertises its accepted models and the requested one is
  * not among them (e.g. Free-tier sessions only accept a subset of discovered
  * models), keeps the session's current model instead of failing the turn.
+ * Reasoning and speed selections are then applied through the active model's
+ * config options, which Devin resets to the model's defaults on every switch.
  */
 export function applyDevinAcpModelSelection<E>(input: {
   readonly runtime: Pick<
     AcpSessionRuntime.AcpSessionRuntime["Service"],
-    "setModel" | "setConfigOption"
+    "setModel" | "setConfigOption" | "getConfigOptions"
   >;
   readonly currentModelId: string | undefined;
   readonly requestedModelId: string | undefined;
+  readonly options?: ReadonlyArray<ProviderOptionSelection> | null | undefined;
   readonly supportedModelIds?: ReadonlySet<string> | undefined;
   /** Negotiated model config option id; when set, selection goes through
    * `session/set_config_option` with this id (cloud sessions use
@@ -171,19 +175,31 @@ export function applyDevinAcpModelSelection<E>(input: {
   const requestedIsSupported =
     input.supportedModelIds === undefined ||
     (input.requestedModelId !== undefined && input.supportedModelIds.has(input.requestedModelId));
-  const shouldSwitchModel =
+  const requestedModelId =
     input.requestedModelId !== undefined &&
     input.requestedModelId !== DEVIN_CLOUD_DEFAULT_MODEL &&
     input.requestedModelId !== input.currentModelId &&
-    requestedIsSupported;
-  if (!shouldSwitchModel) {
-    return Effect.succeed(input.currentModelId);
-  }
-  const applySelection =
-    input.modelConfigOptionId !== undefined
-      ? Effect.asVoid(
-          input.runtime.setConfigOption(input.modelConfigOptionId, input.requestedModelId),
-        )
-      : input.runtime.setModel(input.requestedModelId);
-  return applySelection.pipe(Effect.mapError(input.mapError), Effect.as(input.requestedModelId));
+    requestedIsSupported
+      ? input.requestedModelId
+      : undefined;
+  const switchModel =
+    requestedModelId === undefined
+      ? Effect.void
+      : input.modelConfigOptionId !== undefined
+        ? Effect.asVoid(input.runtime.setConfigOption(input.modelConfigOptionId, requestedModelId))
+        : input.runtime.setModel(requestedModelId);
+  const applyOptions = input.runtime.getConfigOptions.pipe(
+    Effect.flatMap((configOptions) =>
+      Effect.forEach(
+        resolveDevinConfigOptionUpdates(configOptions, input.options),
+        ({ configId, value }) => input.runtime.setConfigOption(configId, value),
+        { discard: true },
+      ),
+    ),
+  );
+  return switchModel.pipe(
+    Effect.andThen(applyOptions),
+    Effect.mapError(input.mapError),
+    Effect.as(requestedModelId ?? input.currentModelId),
+  );
 }

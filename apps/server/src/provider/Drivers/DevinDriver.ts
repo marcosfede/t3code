@@ -17,6 +17,7 @@ import {
   buildInitialDevinProviderSnapshot,
   checkDevinProviderStatus,
   enrichDevinSnapshot,
+  makeDevinModelConfigOptionsProbe,
 } from "../Layers/DevinProvider.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
@@ -103,7 +104,15 @@ export const DevinDriver: ProviderDriver<DevinSettings, DevinDriverEnv> = {
       });
       const textGeneration = yield* makeDevinTextGeneration(effectiveConfig, processEnv);
 
-      const checkProvider = checkDevinProviderStatus(effectiveConfig, processEnv).pipe(
+      const probeModelConfigOptions = yield* makeDevinModelConfigOptionsProbe(
+        effectiveConfig,
+        processEnv,
+      );
+      const checkProvider = checkDevinProviderStatus(
+        effectiveConfig,
+        processEnv,
+        probeModelConfigOptions,
+      ).pipe(
         Effect.map(stampIdentity),
         Effect.provideService(Crypto.Crypto, crypto),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
