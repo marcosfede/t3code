@@ -186,6 +186,29 @@ describe("ServerSettings usage price overrides", () => {
   });
 });
 
+describe("Devin Cloud settings", () => {
+  it("defaults to the devin CLI and round-trips an organization override", () => {
+    expect(decodeServerSettings({}).providers.devinCloud).toMatchObject({
+      enabled: true,
+      binaryPath: "devin",
+    });
+    expect(decodeServerSettings({}).providers.devinCloud).not.toHaveProperty("organizationId");
+    const settings = decodeServerSettings({
+      providers: { devinCloud: { organizationId: " org-selected ", credentialsPath: "/legacy" } },
+    });
+    expect(encodeServerSettings(settings).providers?.devinCloud).toMatchObject({
+      organizationId: "org-selected",
+    });
+    expect(
+      decodeServerSettingsPatch({ providers: { devinCloud: { organizationId: "org-other" } } })
+        .providers?.devinCloud,
+    ).toEqual({ organizationId: "org-other" });
+    expect(() =>
+      decodeServerSettings({ providers: { devinCloud: { organizationId: " " } } }),
+    ).toThrow();
+  });
+});
+
 describe("custom model settings", () => {
   const capabilities = {
     optionDescriptors: [

@@ -514,6 +514,8 @@ interface ProviderInstanceCardProps {
         readonly workspaceRoot: string;
       }>
     | undefined;
+  readonly onLoadOrganizations?: (() => void) | undefined;
+  readonly isLoadingOrganizations?: boolean | undefined;
 }
 
 const EMPTY_ACP_PROJECTS: NonNullable<ProviderInstanceCardProps["acpProjects"]> = [];
@@ -563,6 +565,8 @@ export function ProviderInstanceCard({
   onAcceptUrlAuth,
   environmentId,
   acpProjects = EMPTY_ACP_PROJECTS,
+  onLoadOrganizations,
+  isLoadingOrganizations,
 }: ProviderInstanceCardProps) {
   const enabled = resolveProviderInstanceEnabled(instance);
   const compatibility = enabled ? liveProvider?.compatibilityAdvisory : undefined;
@@ -962,6 +966,9 @@ export function ProviderInstanceCard({
       value={instance.config}
       idPrefix={`provider-instance-${instanceId}`}
       variant="settings"
+      organizations={liveProvider?.organizations}
+      onLoadOrganizations={enabled ? onLoadOrganizations : undefined}
+      isLoadingOrganizations={isLoadingOrganizations}
       onChange={updateConfig}
     />
   ) : (

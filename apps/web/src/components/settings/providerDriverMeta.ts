@@ -4,6 +4,7 @@ import {
   ClaudeSettings,
   CodexSettings,
   CursorSettings,
+  DevinCloudSettings,
   GrokSettings,
   OpenCodeSettings,
   PiSettings,
@@ -75,6 +76,12 @@ const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = [
     value: ProviderDriverKind.make("grok"),
     label: "Grok",
     settingsSchema: GrokSettings,
+  },
+  {
+    value: ProviderDriverKind.make("devinCloud"),
+    label: "Devin Cloud",
+    badgeLabel: "Early Access",
+    settingsSchema: DevinCloudSettings,
   },
   {
     value: ProviderDriverKind.make("opencode"),
