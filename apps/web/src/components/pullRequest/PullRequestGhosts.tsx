@@ -55,15 +55,18 @@ const DEFAULT_DETAIL_TABS = [
 export function PullRequestListGhost({
   rows = 7,
   caption,
+  label = "Loading pull requests",
 }: {
   rows?: number;
+  /** Announced while loading, for lists of things other than pull requests. */
+  label?: string;
   /** Said where the group headers speak, for the states with something to say — a search. */
   caption?: string;
 }) {
   return (
     <div
       role="status"
-      aria-label={caption ?? "Loading pull requests"}
+      aria-label={caption ?? label}
       className="motion-safe:animate-skeleton space-y-0.5"
     >
       {caption ? (

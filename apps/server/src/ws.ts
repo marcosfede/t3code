@@ -244,6 +244,7 @@ import {
 } from "@t3tools/shared/usageLimits";
 import * as AgentSessionScanner from "./project/AgentSessionScanner.ts";
 import * as AgentSessionImporter from "./project/AgentSessionImporter.ts";
+import * as DevinCloudSessions from "./project/DevinCloudSessions.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 
 const CONFIG_DISCOVERY_TIMEOUT = Duration.seconds(5);
@@ -2673,6 +2674,20 @@ const layerWsRpc = (
         [WS_METHODS.agentSessionsScan]: () => agentSessionScanner.scan,
         [WS_METHODS.agentSessionsImport]: (input) =>
           agentSessionImporter.importRecentAgentThreads(input),
+        [WS_METHODS.agentSessionsListDevin]: (input) =>
+          DevinCloudSessions.listDevinCloudSessions({ providerInstances }, input),
+        [WS_METHODS.agentSessionsImportDevinCloud]: (input) =>
+          DevinCloudSessions.importDevinCloudSession(
+            {
+              providerInstances,
+              projectService,
+              threadManagement,
+              threadLaunch,
+              startup,
+              crypto,
+            },
+            input,
+          ),
         [WS_METHODS.assetsCreateUrl]: (input) =>
           Effect.gen(function* () {
             const path = yield* Path.Path;

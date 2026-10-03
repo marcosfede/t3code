@@ -7,6 +7,7 @@ import {
   AntigravityIcon,
   ClaudeAI,
   CursorIcon,
+  DevinIcon,
   GrokIcon,
   Icon,
   OpenAI,
@@ -29,6 +30,7 @@ const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>> = {
   [ProviderDriverKind.make("grok")]: GrokIcon,
   [ProviderDriverKind.make("antigravity")]: AntigravityIcon,
   [ProviderDriverKind.make("pi")]: PiAgentIcon,
+  [ProviderDriverKind.make("devinCloud")]: DevinIcon,
 };
 
 const PROVIDER_TEXT_COLOR_BY_PROVIDER: Partial<Record<ProviderDriverKind, string>> = {

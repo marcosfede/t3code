@@ -142,6 +142,16 @@ export function ProviderIcon(props: ProviderIconProps) {
     );
   }
 
+  if (props.provider === "devinCloud") {
+    return (
+      <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+        <Path d="M4 6h13" stroke={mono} strokeWidth={2.4} strokeLinecap="round" />
+        <Path d="M4 12h16" stroke={mono} strokeWidth={2.4} strokeLinecap="round" />
+        <Path d="M4 18h10" stroke={mono} strokeWidth={2.4} strokeLinecap="round" />
+      </Svg>
+    );
+  }
+
   // codex (and unknown drivers)
   return (
     <Svg width={size} height={size} viewBox="100 100 411 411" fill="none">
