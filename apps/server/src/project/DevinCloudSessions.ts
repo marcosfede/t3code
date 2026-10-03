@@ -133,13 +133,26 @@ export const importDevinCloudSession = Effect.fn("DevinCloudSessions.import")(fu
   const existing = yield* existingShell;
   if (existing !== null) return toResult(existing);
 
+  if (instance.devinCloudSessions === undefined) {
+    return yield* importError("This provider cannot list Devin Cloud sessions.");
+  }
+  const stored = yield* instance.devinCloudSessions.list.pipe(
+    Effect.mapError(() =>
+      importError("Could not reach Devin Cloud to look up the session. Try again."),
+    ),
+  );
+  const session = stored.find((candidate) => candidate.sessionId === sessionId);
+  if (session === undefined) {
+    return yield* importError("No Devin Cloud session with that id was found in this account.");
+  }
+
   const snapshot = yield* instance.snapshot.getSnapshot;
   const model =
     snapshot.models.find((candidate) => candidate.isDefault)?.slug ??
     snapshot.models[0]?.slug ??
     "default";
   const commandId = CommandId.make(yield* deps.crypto.randomUUIDv4.pipe(Effect.orDie));
-  const title = input.title ?? `Devin session ${sessionId}`;
+  const title = input.title ?? session.title ?? `Devin session ${sessionId}`;
   const launched = yield* Effect.result(
     deps.startup.enqueueCommand(
       deps.threadLaunch.launch({
