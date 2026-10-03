@@ -1,6 +1,7 @@
 import { DevinCloudSettings } from "@t3tools/contracts";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -21,6 +22,7 @@ import {
   listDevinCloudSessions,
   makeDevinCloudAcpRuntime,
 } from "../acp/DevinCloudAcpSupport.ts";
+import { makeDevinCloudHistory } from "../acp/DevinCloudHistory.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import {
   buildInitialDevinCloudProviderSnapshot,
@@ -98,9 +100,14 @@ export const DevinCloudDriver: ProviderDriver<DevinCloudSettings, DevinCloudDriv
         use: (
           runtime: Effect.Success<ReturnType<typeof makeDevinCloudAcpRuntime>>,
         ) => Effect.Effect<A, E>,
+        runtimeOptions: Pick<
+          Parameters<typeof makeDevinCloudAcpRuntime>[0],
+          "resumeSessionId" | "transformSessionUpdate"
+        > = {},
       ) =>
         Effect.gen(function* () {
           const runtime = yield* makeDevinCloudAcpRuntime({
+            ...runtimeOptions,
             settings: effectiveConfig,
             environment: processEnv,
             childProcessSpawner: spawner,
@@ -183,6 +190,25 @@ export const DevinCloudDriver: ProviderDriver<DevinCloudSettings, DevinCloudDriv
             Effect.timeout("45 seconds"),
             Effect.mapError(driverError("Could not list Devin Cloud sessions.")),
           ),
+          history: (session) =>
+            Effect.gen(function* () {
+              const history = makeDevinCloudHistory({
+                sessionId: session.sessionId,
+                sessionUrl: session.url,
+                fallbackTimestamp: DateTime.formatIso(yield* DateTime.now),
+              });
+              yield* withRuntime("t3-code-session-history", (runtime) => runtime.start(), {
+                resumeSessionId: session.sessionId,
+                transformSessionUpdate: (notification) => {
+                  history.accept(notification);
+                  return notification;
+                },
+              });
+              return history.history();
+            }).pipe(
+              Effect.timeout("2 minutes"),
+              Effect.mapError(driverError("Could not load the Devin Cloud session history.")),
+            ),
         },
       } satisfies ProviderInstance;
     }),
