@@ -144,7 +144,10 @@ export const withDevinCloudOrganizationLock = Effect.fn("withDevinCloudOrganizat
         Effect.andThen(lock, runtime.loadSession(sessionId, options)),
       resumeSession: (sessionId, options) =>
         Effect.andThen(lock, runtime.resumeSession(sessionId, options)),
-      prompt: (payload) => Effect.andThen(lock, runtime.prompt(payload)),
+      prompt: (
+        payload: Parameters<AcpSessionRuntime.AcpSessionRuntime["Service"]["prompt"]>[0],
+        promptOptions?: Parameters<AcpSessionRuntime.AcpSessionRuntime["Service"]["prompt"]>[1],
+      ) => Effect.andThen(lock, runtime.prompt(payload, promptOptions)),
       setConfigOption,
     } satisfies AcpSessionRuntime.AcpSessionRuntime["Service"];
   },

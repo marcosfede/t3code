@@ -28,6 +28,7 @@ import {
   makeDevinCloudReferenceRewriter,
   normalizeDevinCloudUserMessage,
 } from "../../provider/acp/DevinReferences.ts";
+import { makeDevinCloudReconnect } from "../../provider/acp/DevinCloudReconnect.ts";
 import * as ProviderEventLoggers from "../../provider/Layers/ProviderEventLoggers.ts";
 import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanceEnvironment.ts";
 import * as IdAllocator from "../IdAllocator.ts";
@@ -89,13 +90,16 @@ function makeDevinCloudRuntime(options: DevinCloudAdapterV2Options) {
         runtimePolicy: _runtimePolicy,
         ...runtimeInput
       } = input;
-      const runtime = yield* makeDevinCloudAcpRuntime({
-        ...runtimeInput,
-        mcpServers: [],
-        settings: options.settings,
-        environment: options.environment,
-        childProcessSpawner: options.childProcessSpawner,
-      });
+      const runtime = yield* makeDevinCloudReconnect(runtimeInput, (connection) =>
+        makeDevinCloudAcpRuntime({
+          ...runtimeInput,
+          ...connection,
+          mcpServers: [],
+          settings: options.settings,
+          environment: options.environment,
+          childProcessSpawner: options.childProcessSpawner,
+        }),
+      );
       return yield* withDevinCloudOrganizationLock(runtime, {
         ...(input.resumeSessionId === undefined ? {} : { resumeSessionId: input.resumeSessionId }),
         ...(options.settings.organizationId
