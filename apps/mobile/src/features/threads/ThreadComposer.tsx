@@ -678,6 +678,10 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       onSelectModel: (option) =>
         props.onUpdateModelSelection(withRememberedModelOptions(option.selection)),
       optionDescriptors: providerOptionDescriptors,
+      threadStarted:
+        props.selectedThread.latestRun !== null ||
+        props.selectedThread.latestUserMessageAt !== null ||
+        props.selectedThread.runtime !== null,
       onUpdateOptionSelections: (options) => {
         rememberModelOptions(
           currentModelSelection.instanceId,
@@ -696,6 +700,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       props.onUpdateModelSelection,
       props.onUpdateRuntimeMode,
       providerOptionDescriptors,
+      props.selectedThread,
       settingsOwnerId,
       threadProviderGroups,
     ],

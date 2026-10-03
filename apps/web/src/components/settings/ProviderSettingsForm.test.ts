@@ -98,6 +98,61 @@ describe("ProviderSettingsForm helpers", () => {
     ]);
   });
 
+  it.each(["devinCloud"])(
+    "selects organizations by name and clears the override for %s",
+    (driver) => {
+      const cloud = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make(driver)]!;
+      const local = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("codex")]!;
+      const field = deriveProviderSettingsFields(cloud, [
+        { id: "org-selected", name: "Work" },
+      ]).find((field) => field.key === "organizationId");
+      expect(field).toMatchObject({
+        label: "Organization",
+        control: "select",
+        options: [
+          { value: "", label: "Default organization" },
+          { value: "org-selected", label: "Work" },
+        ],
+      });
+      expect(
+        deriveProviderSettingsFields(local).some((field) => field.key === "organizationId"),
+      ).toBe(false);
+      const configured = nextProviderConfigWithFieldValue(
+        { credentialsPath: "/custom/credentials.toml" },
+        field!,
+        "org-selected",
+      );
+      expect(configured).toEqual({
+        credentialsPath: "/custom/credentials.toml",
+        organizationId: "org-selected",
+      });
+      expect(nextProviderConfigWithFieldValue(configured, field!, "")).toEqual({
+        credentialsPath: "/custom/credentials.toml",
+      });
+    },
+  );
+  it("configures the cloud CLI and clears legacy credentials without losing organization settings", () => {
+    const cloud = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("devinCloud")]!;
+    const fields = deriveProviderSettingsFields(cloud);
+    const binary = fields.find((field) => field.key === "binaryPath")!;
+    const credentials = fields.find((field) => field.key === "credentialsPath")!;
+    const configured = nextProviderConfigWithFieldValue(
+      {
+        organizationId: "org-selected",
+        credentialsPath: "/custom/credentials.toml",
+      },
+      binary,
+      "devin-stable",
+    );
+    expect(nextProviderConfigWithFieldValue(configured, credentials, "")).toEqual({
+      organizationId: "org-selected",
+      binaryPath: "devin-stable",
+    });
+    expect(
+      nextProviderConfigWithFieldValue({ binaryPath: "devin-stable" }, binary, ""),
+    ).toBeUndefined();
+  });
+
   it("preserves unknown config keys while omitting empty configurable fields", () => {
     const opencode = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("opencode")];
     expect(opencode).toBeDefined();
