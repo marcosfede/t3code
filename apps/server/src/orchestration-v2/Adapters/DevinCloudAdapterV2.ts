@@ -24,7 +24,10 @@ import {
   selectConfigOptionChoices,
   withDevinCloudOrganizationLock,
 } from "../../provider/acp/DevinCloudAcpSupport.ts";
-import { makeDevinCloudReferenceRewriter } from "../../provider/acp/DevinReferences.ts";
+import {
+  makeDevinCloudReferenceRewriter,
+  normalizeDevinCloudUserMessage,
+} from "../../provider/acp/DevinReferences.ts";
 import * as ProviderEventLoggers from "../../provider/Layers/ProviderEventLoggers.ts";
 import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanceEnvironment.ts";
 import * as IdAllocator from "../IdAllocator.ts";
@@ -130,7 +133,7 @@ export function makeDevinCloudAdapterV2(options: DevinCloudAdapterV2Options) {
       "cognition.ai/messageGrouping": true,
     },
     normalizeSessionUpdate: (notification) =>
-      rewriteReferences(normalizeDevinSessionUpdate(notification)),
+      rewriteReferences(normalizeDevinCloudUserMessage(normalizeDevinSessionUpdate(notification))),
     normalizeToolCall: normalizeDevinToolCall,
     extractSubagentUpdate: extractDevinSubagentUpdate,
     makeRuntime: options.makeRuntime ?? makeDevinCloudRuntime(options),
