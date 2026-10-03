@@ -15,11 +15,15 @@ argument-hint: "[status|sync|release|updates|local]"
 
 A local commit alone cannot trigger GitHub CI. Every push to `devin` starts a release for that push's tip, including documentation-only changes. A push containing several commits builds their combined tip, not each intermediate commit. Do not commit package-version bumps: CI assigns the release version and updates package versions only in its build workspace.
 
+## Fork spec
+
+[`FORK.md`](../../../FORK.md) lists every feature and behavior the fork must keep. It is the contract for every sync and refactor: the fork's code may be rebuilt however the current upstream needs, but the sync is not done until every invariant there passes its check. When upstream rewrites code the fork depends on, re-implement the invariant on the new architecture instead of restoring deleted upstream code. When upstream ships something that satisfies an invariant, drop the fork's version.
+
 ## How the fork is laid out
 
 - `upstream` = `git@github.com:pingdotgg/t3code.git`, branch `main`. Read-only for us.
 - `origin` = `git@github.com:marcosfede/t3code.git`. Its default and only maintained branch is **`devin`**. Do not create a `main` mirror.
-- `devin` contains upstream plus the fork commits (Devin providers, PostHog off, fork release and sync tooling), and one commit titled **`ci(fork): drop upstream workflows`**. The strip commit deletes every upstream workflow except the fork-owned `release-fork.yml` and `sync-upstream.yml`.
+- `devin` contains upstream plus the fork commits (Devin Cloud, PostHog off, fork release and sync tooling), and one commit titled **`ci(fork): drop upstream workflows`**. The strip commit deletes every upstream workflow except the fork-owned `release-fork.yml` and `sync-upstream.yml`.
 - New fork commits can go above the strip commit. The next sync removes that strip commit, rebases, and recreates it last. The workflow directory consequently stays unchanged across the sync's push, so no PAT is needed. Never re-add upstream workflows or introduce a PAT to work around workflow permissions.
 - `sync-upstream.yml` runs daily at 06:17 UTC and on manual dispatch.
 - `release-fork.yml` runs on pushes to `devin`, successful **Sync upstream** completion, and manual dispatch. The `workflow_run` trigger is necessary because pushes made with `GITHUB_TOKEN` do not trigger push workflows.
@@ -57,9 +61,9 @@ git rebase upstream/main
 
 Conflict hot spots:
 
-- **Provider registration lists** (`packages/contracts/src/settings.ts`, `apps/web/src/session-logic.ts`, provider icon/settings metadata, `apps/server/package.json`, `pnpm-lock.yaml`): retain both upstream additions and Devin entries, upstream first. Keep schemas as complete sequential definitions.
-- **`apps/server/src/provider/acp/AcpSessionRuntime.ts`**: preserve `awaitTermination`, stderr diagnostics, and process teardown through `recordTermination`. Both Devin Cloud provider IDs use CLI stdio (`acp --cloud`); do not restore the removed direct WebSocket transport or credential parser.
-- **`apps/server/scripts/acp-mock-agent.ts`**: retain upstream profile hooks alongside the fork's `T3_ACP_EXIT_AFTER_SESSION_MS` hook.
+- **Provider registration lists** (`packages/contracts/src/settings.ts`, `apps/server/src/provider/builtInDrivers.ts`, `apps/server/src/orchestration-v2/builtInProviderAdapterDrivers.ts`, provider icon/settings metadata, `apps/server/src/provider/model-manifest.json`): retain both upstream additions and the `devinCloud` entries, upstream first.
+- **`apps/server/src/ws.ts`** and **`apps/server/src/orchestration-v2/runtimeLayer.ts`**: the Devin session list/import RPCs and the services they need (`EventSinkV2`) must stay wired.
+- Devin Cloud uses CLI stdio (`acp --cloud`); do not restore the removed direct WebSocket transport or credential parser.
 - Prefer upstream's implementation when it supersedes a fork fix.
 
 Resolve conflicts, stage only the resolved files, and continue with `GIT_EDITOR=true git rebase --continue`. Verify in the worktree without repo-wide checks:
@@ -69,9 +73,11 @@ vp i
 vp run --filter t3 typecheck
 vp run --filter @t3tools/contracts typecheck
 vp run --filter @t3tools/web typecheck
-vp test run apps/server/src/provider/Layers/DevinAdapter.test.ts apps/server/src/provider/acp/DevinAcpSupport.test.ts apps/server/src/provider/acp/DevinCloudAcpSupport.test.ts packages/effect-acp/src/client.test.ts
+vp test run $(git diff --name-only upstream/main HEAD | grep -E '\.test\.tsx?$')
 vp check <files-you-hand-edited>
 ```
+
+Then walk `FORK.md` and run each invariant's manual check that the change could affect, such as Cloud import and reconnect after orchestration or ACP changes.
 
 Known unrelated failures: Antigravity's session-root file-access test fails on pristine upstream on macOS because of the `/var/folders` symlink; some ProviderRegistry tests have hard-coded lists predating the fork providers. Verify findings against the current source rather than assuming every failure is known.
 
