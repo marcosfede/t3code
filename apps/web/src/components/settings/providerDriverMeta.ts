@@ -2,6 +2,7 @@ import {
   AntigravitySettings,
   ClaudeSettings,
   CodexSettings,
+  DevinCloudSettings,
   ProviderDriverKind,
 } from "@t3tools/contracts";
 import { acpRegistryClient } from "@t3tools/provider-acp-registry/client";
@@ -26,6 +27,12 @@ export const providerClients = makeProviderClientRegistry([
   cursorClient,
   grokClient,
   openCodeClient,
+  {
+    driverKind: ProviderDriverKind.make("devinCloud"),
+    label: "Devin Cloud",
+    badgeLabel: "Early Access",
+    settingsSchema: DevinCloudSettings,
+  },
   {
     driverKind: ProviderDriverKind.make("antigravity"),
     label: "Antigravity",

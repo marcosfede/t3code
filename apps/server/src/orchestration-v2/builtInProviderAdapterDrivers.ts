@@ -13,6 +13,10 @@ import {
   CursorAdapterV2Driver,
   type CursorAdapterV2DriverEnv,
 } from "@t3tools/provider-cursor/server";
+import {
+  DevinCloudAdapterV2Driver,
+  type DevinCloudAdapterV2DriverEnv,
+} from "./Adapters/DevinCloudAdapterV2.ts";
 import { GrokAdapterV2Driver, type GrokAdapterV2DriverEnv } from "@t3tools/provider-grok/server";
 import {
   OpenCodeAdapterV2Driver,
@@ -26,6 +30,7 @@ export type BuiltInProviderAdapterDriversV2Env =
   | ClaudeAdapterV2DriverEnv
   | CodexAdapterV2DriverEnv
   | CursorAdapterV2DriverEnv
+  | DevinCloudAdapterV2DriverEnv
   | GrokAdapterV2DriverEnv
   | OpenCodeAdapterV2DriverEnv
   | PiAdapterV2DriverEnv;
@@ -39,6 +44,7 @@ const BUILT_IN_PROVIDER_ADAPTER_DRIVERS_V2: ReadonlyArray<
   OpenCodeAdapterV2Driver,
   GrokAdapterV2Driver,
   PiAdapterV2Driver,
+  DevinCloudAdapterV2Driver,
   AcpRegistryAdapterV2Driver,
 ];
 

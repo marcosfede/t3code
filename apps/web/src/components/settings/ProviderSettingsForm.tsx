@@ -9,6 +9,7 @@ import {
   type ProviderSettingsFormControl,
   type ProviderSettingsFormOption,
   type ProviderSettingsFormSchemaAnnotation,
+  type ServerProvider,
 } from "@t3tools/contracts";
 import { PlusIcon, XIcon } from "lucide-react";
 
@@ -87,6 +88,7 @@ function readFieldBooleanDefault(
 export function deriveProviderSettingsFields(
   definition: SettingsFormDefinition,
   value?: unknown,
+  organizations?: ServerProvider["organizations"],
 ): ReadonlyArray<ProviderSettingsFieldModel> {
   const isLocalAcp =
     definition.driverKind === "acpRegistry" &&
@@ -137,7 +139,15 @@ export function deriveProviderSettingsFields(
             ? { defaultBooleanValue: readFieldBooleanDefault(fieldSchema) }
             : {}),
           ...(formAnnotation.control === "select" && formAnnotation.options
-            ? { options: formAnnotation.options }
+            ? {
+                options:
+                  key === "organizationId"
+                    ? [
+                        ...formAnnotation.options,
+                        ...(organizations ?? []).map((org) => ({ value: org.id, label: org.name })),
+                      ]
+                    : formAnnotation.options,
+              }
             : {}),
         } satisfies ProviderSettingsFieldModel,
       ];
@@ -295,6 +305,9 @@ interface ProviderSettingsFormProps {
   readonly idPrefix: string;
   readonly variant: "card" | "dialog" | "settings";
   readonly onChange: (nextConfig: Record<string, unknown> | undefined) => void;
+  readonly organizations?: ServerProvider["organizations"];
+  readonly onLoadOrganizations?: (() => void) | undefined;
+  readonly isLoadingOrganizations?: boolean | undefined;
 }
 
 function ProviderSettingsSelect({
@@ -304,7 +317,11 @@ function ProviderSettingsSelect({
   size,
   className,
   onChange,
+  onLoadOptions,
+  optionsStatus,
 }: {
+  readonly onLoadOptions?: (() => void) | undefined;
+  readonly optionsStatus?: string | undefined;
   readonly field: ProviderSettingsFieldModel;
   readonly value: unknown;
   readonly inputId: string;
@@ -315,10 +332,15 @@ function ProviderSettingsSelect({
   const options = field.options ?? [];
   const fallback = options[0]?.value ?? "";
   const current = readProviderConfigString(value, field.key) || fallback;
-  const label = options.find((option) => option.value === current)?.label ?? current;
+  const label =
+    options.find((option) => option.value === current)?.label ??
+    (field.key === "organizationId" ? "Selected organization" : current);
   return (
     <Select
       value={current}
+      onOpenChange={(open) => {
+        if (open) onLoadOptions?.();
+      }}
       onValueChange={(next) => {
         if (typeof next !== "string") return;
         onChange(nextProviderConfigWithFieldValue(value, field, next === fallback ? "" : next));
@@ -328,6 +350,11 @@ function ProviderSettingsSelect({
         <SelectValue>{label}</SelectValue>
       </SelectTrigger>
       <SelectPopup align="start" alignItemWithTrigger={false}>
+        {optionsStatus ? (
+          <div role="status" className="px-2 py-1.5 text-xs text-muted-foreground">
+            {optionsStatus}
+          </div>
+        ) : null}
         {options.map((option) => (
           <SelectItem key={option.value} value={option.value}>
             {option.label}
@@ -354,6 +381,8 @@ interface ProviderSettingsFieldRowProps {
   readonly idPrefix: string;
   readonly variant: ProviderSettingsFormProps["variant"];
   readonly onChange: ProviderSettingsFormProps["onChange"];
+  readonly onLoadOptions?: (() => void) | undefined;
+  readonly optionsStatus?: string | undefined;
 }
 
 function ProviderSettingsFieldRow({
@@ -362,6 +391,8 @@ function ProviderSettingsFieldRow({
   idPrefix,
   variant,
   onChange,
+  onLoadOptions,
+  optionsStatus,
 }: ProviderSettingsFieldRowProps) {
   const inputId = `${idPrefix}-${field.key}`;
   const descriptionClassName =
@@ -392,6 +423,8 @@ function ProviderSettingsFieldRow({
           inputId={inputId}
           size="sm"
           className="w-full max-w-full @min-[32rem]/settings-row:w-56"
+          onLoadOptions={onLoadOptions}
+          optionsStatus={optionsStatus}
           onChange={onChange}
         />
       ) : field.control === "textarea" ? (
@@ -477,6 +510,8 @@ function ProviderSettingsFieldRow({
             inputId={inputId}
             size="sm"
             className={cn("w-full", variant === "card" && "mt-1.5")}
+            onLoadOptions={onLoadOptions}
+            optionsStatus={optionsStatus}
             onChange={onChange}
           />
           {description}
@@ -550,14 +585,26 @@ export function ProviderSettingsForm({
   idPrefix,
   variant,
   onChange,
+  organizations,
+  onLoadOrganizations,
+  isLoadingOrganizations = false,
 }: ProviderSettingsFormProps) {
   const fields = useMemo(
-    () => deriveProviderSettingsFields(definition, value),
-    [definition, value],
+    () => deriveProviderSettingsFields(definition, value, organizations),
+    [definition, value, organizations],
   );
   const isLocalAcp =
     definition.driverKind === "acpRegistry" &&
     readProviderConfigString(value, "source") === "local";
+  const organizationStatus = isLoadingOrganizations
+    ? "Loading organizations…"
+    : !onLoadOrganizations
+      ? "Save and enable this provider to load organizations."
+      : organizations?.length === 0
+        ? "No organizations available for this account."
+        : organizations === undefined
+          ? "Open the picker to load organizations. If loading fails, close and reopen to retry."
+          : undefined;
 
   if (fields.length === 0) {
     return null;
@@ -572,6 +619,12 @@ export function ProviderSettingsForm({
           value={value}
           idPrefix={idPrefix}
           variant={variant}
+          onLoadOptions={
+            field.key === "organizationId" && organizations === undefined && !isLoadingOrganizations
+              ? onLoadOrganizations
+              : undefined
+          }
+          optionsStatus={field.key === "organizationId" ? organizationStatus : undefined}
           onChange={onChange}
         />
       ))}

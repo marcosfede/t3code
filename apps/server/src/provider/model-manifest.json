@@ -51,6 +51,12 @@
       ]
     },
     {
+      "driver": "devinCloud",
+      "t3CodeRange": ">=0.0.42",
+      "recommendedRange": ">=3000.11.0",
+      "ranges": [{ "range": ">=0.0.0", "status": "supported" }]
+    },
+    {
       "driver": "opencode",
       "t3CodeRange": ">=0.0.42 <0.0.46",
       "recommendedRange": ">=1.14.19 <2.0.0",
