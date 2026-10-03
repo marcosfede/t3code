@@ -19,7 +19,20 @@ export const agentSessionScan = createEnvironmentRpcQueryAtomFamily(connectionAt
   idleTtlMs: 5 * 60_000,
 });
 
+export const devinCloudSessionImport = createEnvironmentRpcCommand(connectionAtomRuntime, {
+  label: "environment-data:agent-sessions:import-devin-cloud",
+  tag: WS_METHODS.agentSessionsImportDevinCloud,
+});
+
 export const agentSessionImport = createEnvironmentRpcCommand(connectionAtomRuntime, {
   label: "environment-data:agent-sessions:import",
   tag: WS_METHODS.agentSessionsImport,
+});
+
+/** Sessions stored by the environment's Devin providers (local CLI and Devin Cloud). */
+export const devinSessionList = createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
+  label: "environment-data:agent-sessions:list-devin",
+  tag: WS_METHODS.agentSessionsListDevin,
+  staleTimeMs: 30_000,
+  idleTtlMs: 5 * 60_000,
 });

@@ -833,6 +833,53 @@ export const AntigravitySettings = makeProviderSettingsSchema(
 );
 export type AntigravitySettings = typeof AntigravitySettings.Type;
 
+export const DevinCloudSettings = makeProviderSettingsSchema(
+  {
+    enabled: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(true)),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    organizationId: Schema.optionalKey(TrimmedNonEmptyString).pipe(
+      Schema.annotateKey({
+        title: "Organization",
+        description:
+          "Organization for new Devin Cloud sessions. Existing sessions keep their organization.",
+        providerSettingsForm: {
+          control: "select",
+          options: [{ value: "", label: "Default organization" }],
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
+    binaryPath: makeBinaryPathSetting("devin").pipe(
+      Schema.annotateKey({
+        title: "Binary path",
+        description: "Path to a Devin CLI with `acp --cloud` support.",
+        providerSettingsForm: { placeholder: "devin", clearWhenEmpty: "omit" },
+      }),
+    ),
+    credentialsPath: Schema.optionalKey(TrimmedNonEmptyString).pipe(
+      Schema.annotateKey({
+        title: "Credentials path (legacy)",
+        description:
+          "No longer read by T3. Sign in with the configured Devin CLI using `auth login`, then clear this field. For an isolated account, set XDG_DATA_HOME in the provider environment.",
+        providerSettingsForm: {
+          placeholder: "~/.local/share/devin/credentials.toml",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
+    customModels: Schema.Array(CustomModelSetting).pipe(
+      Schema.withDecodingDefault(Effect.succeed([])),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+  },
+  {
+    order: ["binaryPath", "organizationId", "credentialsPath"],
+  },
+);
+export type DevinCloudSettings = typeof DevinCloudSettings.Type;
+
 export const PiSettings = makeProviderSettingsSchema(
   {
     // Off by default like Cursor and Grok. Users opt in from Settings.
@@ -1380,6 +1427,7 @@ export const ServerSettings = Schema.Struct({
     pi: PiSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     opencode: OpenCodeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     antigravity: AntigravitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+    devinCloud: DevinCloudSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   }).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   // New driver-agnostic instance map. Keyed by `ProviderInstanceId`; values
   // are `ProviderInstanceConfig` envelopes. The driver-specific config blob
@@ -1558,6 +1606,14 @@ const PiSettingsPatch = Schema.Struct({
   customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
 });
 
+const DevinCloudSettingsPatch = Schema.Struct({
+  enabled: Schema.optionalKey(Schema.Boolean),
+  binaryPath: Schema.optionalKey(TrimmedString),
+  organizationId: Schema.optionalKey(TrimmedNonEmptyString),
+  credentialsPath: Schema.optionalKey(TrimmedString),
+  customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
+});
+
 const OpenCodeSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
   binaryPath: Schema.optionalKey(TrimmedString),
@@ -1682,6 +1738,7 @@ export const ServerSettingsPatch = Schema.Struct({
       pi: Schema.optionalKey(PiSettingsPatch),
       opencode: Schema.optionalKey(OpenCodeSettingsPatch),
       antigravity: Schema.optionalKey(AntigravitySettingsPatch),
+      devinCloud: Schema.optionalKey(DevinCloudSettingsPatch),
     }),
   ),
   // Whole-map replacement for the new instance config. Patching individual

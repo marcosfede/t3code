@@ -241,6 +241,7 @@ import {
 } from "@t3tools/shared/usageLimits";
 import * as AgentSessionScanner from "./project/AgentSessionScanner.ts";
 import * as AgentSessionImporter from "./project/AgentSessionImporter.ts";
+import * as DevinCloudSessions from "./project/DevinCloudSessions.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 
 const CONFIG_DISCOVERY_TIMEOUT = Duration.seconds(5);
@@ -3181,6 +3182,28 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             WS_METHODS.agentSessionsImport,
             agentSessionImporter.importRecentAgentThreads(input),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.agentSessionsListDevin]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentSessionsListDevin,
+            DevinCloudSessions.listDevinCloudSessions({ providerInstances }, input),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.agentSessionsImportDevinCloud]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentSessionsImportDevinCloud,
+            DevinCloudSessions.importDevinCloudSession(
+              {
+                providerInstances,
+                projectService,
+                threadManagement,
+                threadLaunch,
+                startup,
+                crypto,
+              },
+              input,
+            ),
             { "rpc.aggregate": "workspace" },
           ),
         [WS_METHODS.assetsCreateUrl]: (input) =>
