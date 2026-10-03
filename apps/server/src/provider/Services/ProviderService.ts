@@ -32,7 +32,11 @@ import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 
 import type { ProviderAdapterError, ProviderServiceError } from "../Errors.ts";
-import type { ProviderAdapterCapabilities, ProviderSessionStartHooks } from "./ProviderAdapter.ts";
+import type {
+  ProviderAdapterCapabilities,
+  ProviderNativeSession,
+  ProviderSessionStartHooks,
+} from "./ProviderAdapter.ts";
 import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
 
 /**
@@ -106,6 +110,14 @@ export interface ProviderServiceShape {
   readonly getInstanceInfo: (
     instanceId: ProviderInstanceId,
   ) => Effect.Effect<ProviderInstanceRoutingInfo, ProviderServiceError>;
+
+  /**
+   * List conversations stored by the provider instance itself. Empty when the
+   * adapter has no listable native session store.
+   */
+  readonly listNativeSessions: (
+    instanceId: ProviderInstanceId,
+  ) => Effect.Effect<ReadonlyArray<ProviderNativeSession>, ProviderServiceError>;
 
   /**
    * Reject unsupported rewind before files change, without resuming the session.

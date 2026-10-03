@@ -22,7 +22,11 @@ export function devinCloudSessionState(
   }
 }
 
-export function makeDevinCloudHistory(sessionId: string, fallbackTimestamp: string) {
+export function makeDevinCloudHistory(
+  sessionId: string,
+  fallbackTimestamp: string,
+  options: { readonly cloud?: boolean } = { cloud: true },
+) {
   const messages: Array<ProviderSessionHistory["messages"][number]> = [];
   let previousId: unknown;
   let boundary = true;
@@ -75,7 +79,10 @@ export function makeDevinCloudHistory(sessionId: string, fallbackTimestamp: stri
         .filter((message) => message.text.trim().length > 0)
         .map((message) => {
           if (message.role !== "assistant") return message;
-          const normalize = makeDevinReferenceNormalizer({ cloud: true, sessionMetadata });
+          const normalize = makeDevinReferenceNormalizer({
+            cloud: options.cloud ?? true,
+            sessionMetadata,
+          });
           const events = [
             ...normalize({
               _tag: "ContentDelta",

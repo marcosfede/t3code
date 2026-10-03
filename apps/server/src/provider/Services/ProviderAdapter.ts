@@ -75,6 +75,18 @@ export interface ProviderSessionHistory {
   }>;
 }
 
+/** A conversation stored by the provider itself, importable through `startSession` hooks. */
+export interface ProviderNativeSession {
+  readonly sessionId: string;
+  readonly title: string | null;
+  readonly cwd: string | null;
+  readonly updatedAt: string | null;
+  readonly url: string | null;
+  readonly status: string | null;
+  readonly repositories: ReadonlyArray<string>;
+  readonly excerpt: string | null;
+}
+
 export interface ProviderSessionStartHooks<TError> {
   readonly onHistory: (history: ProviderSessionHistory) => Effect.Effect<void, TError>;
 }
@@ -154,6 +166,9 @@ export interface ProviderAdapterShape<TError> {
     threadId: ThreadId,
     numTurns: number,
   ) => Effect.Effect<ProviderThreadSnapshot, TError>;
+
+  /** Omitted when the provider has no listable native session store. */
+  readonly listNativeSessions?: () => Effect.Effect<ReadonlyArray<ProviderNativeSession>, TError>;
 
   /**
    * Upload a thread to the provider when the adapter supports feedback.

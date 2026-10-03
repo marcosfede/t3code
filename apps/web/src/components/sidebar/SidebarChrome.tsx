@@ -6,6 +6,7 @@ import { Link, useLocation, useNavigate } from "@tanstack/react-router";
 import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
 import { useEnvironments } from "../../state/environments";
+import { DevinIcon } from "../Icons";
 import { T3Wordmark } from "../T3Wordmark";
 import {
   resolveEnvironmentIdentificationPillLabel,
@@ -139,6 +140,15 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
   const pullRequestsSupported = environments.some(
     (environment) => environment.serverConfig?.environment.capabilities.pullRequests === true,
   );
+  const devinSupported = environments.some((environment) =>
+    environment.serverConfig?.providers.some(
+      (provider) =>
+        provider.enabled &&
+        (provider.driver === "devin" ||
+          provider.driver === "devinCloud" ||
+          provider.driver === "devinCloudCli"),
+    ),
+  );
   const closeMobileSidebar = useCallback(() => {
     if (isMobile) {
       setOpenMobile(false);
@@ -150,6 +160,10 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
       to: "/pull-requests",
       search: readPullRequestListPreferences(),
     });
+  }, [closeMobileSidebar, navigate]);
+  const handleDevinSessionsClick = useCallback(() => {
+    closeMobileSidebar();
+    void navigate({ to: "/devin-sessions" });
   }, [closeMobileSidebar, navigate]);
   const handleSettingsClick = useCallback(() => {
     closeMobileSidebar();
@@ -189,6 +203,13 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
               icon={<PullRequestGlyph.pullRequest />}
               label="Pull Requests"
               onClick={handlePullRequestsClick}
+            />
+          ) : null}
+          {devinSupported ? (
+            <SidebarUtilityItem
+              icon={<DevinIcon />}
+              label="Devin sessions"
+              onClick={handleDevinSessionsClick}
             />
           ) : null}
           <SidebarUtilityItem

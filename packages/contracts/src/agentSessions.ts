@@ -95,6 +95,52 @@ export function parseDevinCloudSessionId(value: string): string | undefined {
   return match?.[1];
 }
 
+export const DevinSessionKind = Schema.Literals(["local", "cloud"]);
+export type DevinSessionKind = typeof DevinSessionKind.Type;
+
+/** A session stored by a Devin provider instance (local CLI or Devin Cloud). */
+export const DevinSessionSummary = Schema.Struct({
+  providerInstanceId: ProviderInstanceId,
+  kind: DevinSessionKind,
+  sessionId: TrimmedNonEmptyString,
+  title: Schema.NullOr(Schema.String),
+  cwd: Schema.NullOr(Schema.String),
+  updatedAt: Schema.NullOr(Schema.String),
+  url: Schema.NullOr(Schema.String),
+  status: Schema.NullOr(Schema.String),
+  repositories: Schema.Array(Schema.String),
+  excerpt: Schema.NullOr(Schema.String),
+});
+export type DevinSessionSummary = typeof DevinSessionSummary.Type;
+
+export const DevinSessionListInput = Schema.Struct({
+  /** Matches every stored session by title, ID, directory, excerpt or repository. */
+  query: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(200))),
+  /** Without a query, keeps sessions updated at or after this instant. */
+  updatedAfter: Schema.optionalKey(IsoDateTime),
+});
+export type DevinSessionListInput = typeof DevinSessionListInput.Type;
+
+export const DevinSessionListResult = Schema.Struct({
+  sessions: Schema.Array(DevinSessionSummary),
+  /** Provider instances whose sessions could not be listed. */
+  failures: Schema.Array(
+    Schema.Struct({ providerInstanceId: ProviderInstanceId, detail: Schema.String }),
+  ),
+});
+export type DevinSessionListResult = typeof DevinSessionListResult.Type;
+
+export function matchesDevinSessionQuery(
+  session: Pick<DevinSessionSummary, "title" | "sessionId" | "cwd" | "excerpt" | "repositories">,
+  query: string,
+): boolean {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return true;
+  return [session.title, session.sessionId, session.cwd, session.excerpt, ...session.repositories]
+    .filter((value): value is string => value !== null)
+    .some((value) => value.toLowerCase().includes(needle));
+}
+
 export const DevinCloudSessionImportInput = Schema.Struct({
   projectId: ProjectId,
   session: TrimmedNonEmptyString.check(Schema.isMaxLength(2048)),
@@ -102,7 +148,12 @@ export const DevinCloudSessionImportInput = Schema.Struct({
 });
 export type DevinCloudSessionImportInput = typeof DevinCloudSessionImportInput.Type;
 
-export const DevinCloudSessionImportResult = Schema.Struct({ threadId: ThreadId });
+export const DevinCloudSessionImportResult = Schema.Struct({
+  threadId: ThreadId,
+  /** Set when the session was already in T3 as an archived thread, which is left archived. */
+  archived: Schema.optionalKey(Schema.Boolean),
+});
+export type DevinCloudSessionImportResult = typeof DevinCloudSessionImportResult.Type;
 
 export class DevinCloudSessionImportError extends Schema.TaggedError<DevinCloudSessionImportError>()(
   "DevinCloudSessionImportError",

@@ -371,6 +371,7 @@ describe("ProviderCommandReactor", () => {
           sessionModelSwitch: input?.sessionModelSwitch ?? "in-session",
         }),
       assertConversationRollbackSupported: () => unsupported(),
+      listNativeSessions: () => Effect.succeed([]),
       getInstanceInfo: (instanceId) => {
         const raw = String(instanceId);
         const driverKind = ProviderDriverKind.make(
