@@ -319,6 +319,7 @@ export const OrchestrationV2ProductionLayerLive = Layer.mergeAll(
   ),
   providerContinuationWorkerProvided,
   agentSessionImporterProvided,
+  eventSinkProvided,
 ).pipe(
   Layer.provide(Scheduler.layer),
   Layer.provideMerge(OrchestrationEventInfrastructureLayerLive),
