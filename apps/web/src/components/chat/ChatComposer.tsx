@@ -2378,10 +2378,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeThreadModelSelection,
     modelOptionsByInstance,
   );
+  const activeThreadStarted = threadShellHasStarted(props.activeThreadShell);
   const reserveContextWindowMeter = shouldReserveContextWindowMeter({
     meterEnabled: settings.contextWindowMeterEnabled,
     detailLoading: props.threadSyncPhase === "loading",
-    threadStarted: threadShellHasStarted(props.activeThreadShell),
+    threadStarted: activeThreadStarted,
     providerReportsContextWindow: selectedProviderStatus
       ? selectedProviderStatus.reportsContextWindow === true
       : null,
@@ -2866,6 +2867,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     prompt,
     onPromptChange: setPromptFromTraitsStable,
     planModeEnabled: settings.planModeEnabled,
+    threadStarted: activeThreadStarted,
   });
   const providerTraitsPickerInput = {
     provider: selectedProvider,
@@ -2880,6 +2882,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onPromptChange: setPromptFromTraitsStable,
     planModeEnabled: settings.planModeEnabled,
     isComposerOwned: true,
+    threadStarted: activeThreadStarted,
   } satisfies Parameters<typeof renderProviderTraitsPicker>[0];
   const providerTraitsPicker = renderProviderTraitsPicker(providerTraitsPickerInput);
   const [inlineRestingControlsHost, setInlineRestingControlsHost] = useState<HTMLDivElement | null>(

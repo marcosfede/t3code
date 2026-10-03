@@ -262,6 +262,14 @@ export const ServerProvider = Schema.Struct({
   message: Schema.optional(TrimmedNonEmptyString),
   availability: Schema.optional(ServerProviderAvailability),
   unavailableReason: Schema.optional(TrimmedNonEmptyString),
+  organizations: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        id: TrimmedNonEmptyString,
+        name: TrimmedNonEmptyString,
+      }),
+    ),
+  ),
   models: Schema.Array(ServerProviderModel),
   // Kept apart from `models` so clients that predate it never offer them.
   updateRequiredModels: Schema.optionalKey(Schema.Array(ServerProviderUpdateRequiredModel)),

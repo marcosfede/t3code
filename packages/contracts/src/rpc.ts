@@ -91,6 +91,11 @@ import {
   AgentSessionScanInput,
   AgentSessionScanResult,
   AgentSessionScanError,
+  DevinCloudSessionImportError,
+  DevinCloudSessionImportInput,
+  DevinCloudSessionImportResult,
+  DevinSessionListInput,
+  DevinSessionListResult,
 } from "./agentSessions.ts";
 import {
   AssetAccessError,
@@ -390,6 +395,8 @@ export const WS_METHODS = {
   filesystemGetMetadata: "filesystem.getMetadata",
   agentSessionsScan: "agentSessions.scan",
   agentSessionsImport: "agentSessions.import",
+  agentSessionsImportDevinCloud: "agentSessions.importDevinCloud",
+  agentSessionsListDevin: "agentSessions.listDevin",
   assetsCreateUrl: "assets.createUrl",
   assetsPersistChatAttachments: "assets.persistChatAttachments",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
@@ -1260,6 +1267,18 @@ const WsAgentSessionsScanRpc = Rpc.make(WS_METHODS.agentSessionsScan, {
   error: Schema.Union([AgentSessionScanError, EnvironmentAuthorizationError]),
 });
 
+const WsDevinCloudSessionImportRpc = Rpc.make(WS_METHODS.agentSessionsImportDevinCloud, {
+  payload: DevinCloudSessionImportInput,
+  success: DevinCloudSessionImportResult,
+  error: Schema.Union([DevinCloudSessionImportError, EnvironmentAuthorizationError]),
+});
+
+const WsDevinSessionListRpc = Rpc.make(WS_METHODS.agentSessionsListDevin, {
+  payload: DevinSessionListInput,
+  success: DevinSessionListResult,
+  error: EnvironmentAuthorizationError,
+});
+
 const WsAgentSessionsImportRpc = Rpc.make(WS_METHODS.agentSessionsImport, {
   payload: AgentSessionImportInput,
   success: AgentSessionImportResult,
@@ -1971,6 +1990,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsFilesystemGetMetadataRpc,
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
+  WsDevinCloudSessionImportRpc,
+  WsDevinSessionListRpc,
   WsAssetsCreateUrlRpc,
   WsAssetsPersistChatAttachmentsRpc,
   WsAttachmentsCreateUploadUrlRpc,

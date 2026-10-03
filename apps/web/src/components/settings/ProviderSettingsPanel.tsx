@@ -654,27 +654,32 @@ export function EnvironmentProviderSettings({
   );
   const defaultProviderHealthRefreshIntervalSeconds = durationToSeconds(providerHealthPreset);
 
-  const refreshProviders = () => {
-    if (refreshingRef.current || !readEnvironmentScope(environmentId, AuthOrchestrationReadScope))
-      return;
-    refreshingRef.current = true;
-    setIsRefreshingProviders(true);
-    void (async () => {
-      const result = await refreshServerProviders({
-        environmentId,
-        input: { refreshModels: true },
-      });
-      refreshingRef.current = false;
-      setIsRefreshingProviders(false);
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        console.warn("Failed to refresh providers", {
-          operation: "refresh-providers",
+  const refreshProviders = (instanceId?: ProviderInstanceId) => {
+      if (refreshingRef.current || !readEnvironmentScope(environmentId, AuthOrchestrationReadScope))
+        return;
+      refreshingRef.current = true;
+      setIsRefreshingProviders(true);
+      void (async () => {
+        const result = await refreshServerProviders({
           environmentId,
-          ...safeErrorLogAttributes(squashAtomCommandFailure(result)),
+          input: { refreshModels: true, ...(instanceId ? { instanceId } : {}) },
         });
-      }
-    })();
-  };
+        refreshingRef.current = false;
+        setIsRefreshingProviders(false);
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          toastManager.add({
+            type: "error",
+            title: "Could not refresh provider choices",
+            description: "Check the provider sign-in and try again.",
+          });
+          console.warn("Failed to refresh providers", {
+            operation: "refresh-providers",
+            environmentId,
+            ...safeErrorLogAttributes(squashAtomCommandFailure(result)),
+          });
+        }
+      })();
+    };
 
   const runProviderUpdate = useStableCallback(
     async (
@@ -955,6 +960,8 @@ export function EnvironmentProviderSettings({
         explicitInstance={row.explicitInstance}
         isDefault={row.isDefault}
         isDirty={row.isDirty === true}
+        onLoadOrganizations={() => refreshProviders(row.instanceId)}
+        isLoadingOrganizations={isRefreshingProviders}
         mode={mode}
         selected={mode === "list" && selectedRow?.instanceId === row.instanceId}
         readOnly={readOnly}
