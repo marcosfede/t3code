@@ -184,3 +184,49 @@ function rewriteReferences(state: ReferenceState, chunk: string, cloudUrl: strin
   }
   return output + input.slice(offset);
 }
+
+const T3_PROMPT_SECTION =
+  /<(t3_code_instructions|runtime_info|pull_request_linking)>[\s\S]*?<\/\1>/g;
+const T3_USER_REQUEST = /<user_request>\n?([\s\S]*?)\n?<\/user_request>/;
+
+/** Recovers the user's own words from a prompt T3 wrapped with instructions. */
+export function unwrapT3PromptText(text: string): string {
+  if (!/<(t3_code_instructions|runtime_info|pull_request_linking|user_request)>/.test(text)) {
+    return text;
+  }
+  const request = T3_USER_REQUEST.exec(text);
+  return (request?.[1] ?? text).replace(T3_PROMPT_SECTION, "").trim();
+}
+
+/**
+ * Devin Cloud echoes each submitted prompt back as a whole `user_message`.
+ * Re-emitting it as a chunk lets the active turn ignore the echo (the turn already
+ * projected the prompt) while replayed history still yields the user message.
+ */
+export function normalizeDevinCloudUserMessage(
+  notification: EffectAcpSchema.SessionNotification,
+): EffectAcpSchema.SessionNotification {
+  const update = notification.update;
+  if (update.sessionUpdate === "user_message_chunk") {
+    if (update.content.type !== "text") return notification;
+    const text = unwrapT3PromptText(update.content.text);
+    return text === update.content.text
+      ? notification
+      : { ...notification, update: { ...update, content: { ...update.content, text } } };
+  }
+  if (update.sessionUpdate !== "user_message") return notification;
+  const blocks = update.content ?? [];
+  if (!blocks.every((block) => block.type === "text")) return notification;
+  const text = unwrapT3PromptText(
+    blocks.map((block) => (block.type === "text" ? block.text : "")).join("\n\n"),
+  );
+  return {
+    ...notification,
+    update: {
+      sessionUpdate: "user_message_chunk",
+      messageId: update.messageId,
+      content: { type: "text", text },
+      ...(update._meta !== undefined ? { _meta: update._meta } : {}),
+    },
+  };
+}
