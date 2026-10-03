@@ -1,4 +1,11 @@
 import {
+  EventId,
+  ThreadId,
+  MessageId,
+  TurnItemId,
+  type OrchestrationV2ConversationMessage,
+  type OrchestrationV2DomainEvent,
+  type OrchestrationV2TurnItem,
   CommandId,
   DevinCloudSessionImportError,
   matchesDevinSessionQuery,
@@ -11,11 +18,14 @@ import {
   type DevinSessionSummary,
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 
+import type * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as IdAllocator from "../orchestration-v2/IdAllocator.ts";
+import type { DevinCloudHistoryMessage } from "../provider/acp/DevinCloudHistory.ts";
 import type * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import type * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import type { ProviderInstance } from "../provider/ProviderDriver.ts";
@@ -32,6 +42,7 @@ export interface DevinCloudSessionsDeps {
   readonly threadLaunch: ThreadLaunchService.ThreadLaunchService["Service"];
   readonly startup: ServerRuntimeStartup.ServerRuntimeStartup["Service"];
   readonly crypto: Crypto.Crypto;
+  readonly eventSink: EventSink.EventSinkV2["Service"];
 }
 
 type DevinCloudInstance = ProviderInstance & {
@@ -96,6 +107,81 @@ export const listDevinCloudSessions = Effect.fn("DevinCloudSessions.list")(funct
 
 const importError = (detail: string) => new DevinCloudSessionImportError({ detail });
 
+const HISTORY_EVENT_PREFIX = "devin-cloud-import:v1";
+
+/**
+ * Imported history sits at ordinal 0, before every run's items (runs start at
+ * 100), and keeps its order through the zero-padded turn item ids.
+ */
+function historyEvents(
+  threadId: ThreadId,
+  index: number,
+  entry: DevinCloudHistoryMessage,
+): ReadonlyArray<OrchestrationV2DomainEvent> {
+  const suffix = String(index).padStart(6, "0");
+  const messageId = MessageId.make(`${threadId}:devin-cloud:${suffix}`);
+  const at = DateTime.makeUnsafe(entry.createdAt);
+  const message: OrchestrationV2ConversationMessage = {
+    createdBy: entry.role === "user" ? "user" : "agent",
+    creationSource: "server",
+    id: messageId,
+    threadId,
+    runId: null,
+    nodeId: null,
+    role: entry.role,
+    text: entry.text,
+    attachments: [],
+    streaming: false,
+    createdAt: at,
+    updatedAt: at,
+  };
+  const common = {
+    id: TurnItemId.make(`${HISTORY_EVENT_PREFIX}:turn-item:${threadId}:${suffix}`),
+    threadId,
+    runId: null,
+    nodeId: null,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: null,
+    ordinal: 0,
+    status: "completed" as const,
+    title: null,
+    startedAt: at,
+    completedAt: at,
+    updatedAt: at,
+  };
+  const turnItem: OrchestrationV2TurnItem =
+    entry.role === "user"
+      ? {
+          ...common,
+          createdBy: "user",
+          creationSource: "server",
+          type: "user_message",
+          messageId,
+          inputIntent: "turn_start",
+          text: entry.text,
+          attachments: [],
+        }
+      : { ...common, type: "assistant_message", messageId, text: entry.text, streaming: false };
+  return [
+    {
+      id: EventId.make(`${HISTORY_EVENT_PREFIX}:message:${threadId}:${suffix}`),
+      type: "message.updated",
+      threadId,
+      occurredAt: at,
+      payload: message,
+    },
+    {
+      id: EventId.make(`${HISTORY_EVENT_PREFIX}:turn-item:${threadId}:${suffix}`),
+      type: "turn-item.updated",
+      threadId,
+      occurredAt: at,
+      payload: turnItem,
+    },
+  ];
+}
+
 /**
  * Opens a Devin Cloud session as a T3 thread. The thread id derives from the
  * session id, so importing the same session again returns the existing thread.
@@ -145,6 +231,12 @@ export const importDevinCloudSession = Effect.fn("DevinCloudSessions.import")(fu
   if (session === undefined) {
     return yield* importError("No Devin Cloud session with that id was found in this account.");
   }
+  const history = yield* instance.devinCloudSessions.history(session).pipe(
+    Effect.tapError((cause) =>
+      Effect.logWarning("Could not load a Devin Cloud session history", { sessionId, cause }),
+    ),
+    Effect.mapError(() => importError("Could not load the Devin session's messages. Try again.")),
+  );
 
   const snapshot = yield* instance.snapshot.getSnapshot;
   const model =
@@ -152,7 +244,7 @@ export const importDevinCloudSession = Effect.fn("DevinCloudSessions.import")(fu
     snapshot.models[0]?.slug ??
     "default";
   const commandId = CommandId.make(yield* deps.crypto.randomUUIDv4.pipe(Effect.orDie));
-  const title = input.title ?? session.title ?? `Devin session ${sessionId}`;
+  const title = input.title ?? session.title ?? history.title ?? `Devin session ${sessionId}`;
   const launched = yield* Effect.result(
     deps.startup.enqueueCommand(
       deps.threadLaunch.launch({
@@ -181,6 +273,20 @@ export const importDevinCloudSession = Effect.fn("DevinCloudSessions.import")(fu
       cause: launched.failure,
     });
     return yield* importError("Could not create a thread for the Devin session.");
+  }
+  if (history.messages.length > 0) {
+    yield* deps.eventSink
+      .write({
+        events: history.messages.flatMap((entry, index) => historyEvents(threadId, index, entry)),
+      })
+      .pipe(
+        Effect.tapError((cause) =>
+          Effect.logWarning("Could not save a Devin Cloud session history", { sessionId, cause }),
+        ),
+        Effect.mapError(() =>
+          importError("The thread was created, but its earlier messages could not be saved."),
+        ),
+      );
   }
   return { threadId } satisfies DevinCloudSessionImportResult;
 });
