@@ -17,7 +17,6 @@ export const DEVIN_CLOUD_ORGANIZATION_OPTION_ID = "org_id";
 export const DEVIN_CLOUD_CREDENTIALS_MIGRATION_MESSAGE =
   "Devin Cloud now uses the Devin CLI for authentication. Sign in with the configured binary using `auth login`, then clear the legacy Credentials path in Settings → Providers. For an isolated account, configure the CLI's XDG_DATA_HOME in the provider environment.";
 const DEVIN_CLOUD_MODEL_OPTION_IDS = new Set(["model", "devin_version"]);
-const MAX_SESSION_LIST_PAGES = 20;
 
 type SessionConfigOption = AcpCompat.SessionConfigOption;
 type SelectConfigOption = Extract<SessionConfigOption, { readonly type: "select" }>;
@@ -252,25 +251,39 @@ export function devinNativeSessionFromAcp(
 
 const decodeListSessionsResponse = Schema.decodeUnknownEffect(EffectAcpSchema.ListSessionsResponse);
 
-/** Lists stored sessions through ACP `session/list`, following `nextCursor`. */
+export interface DevinSessionPageInput {
+  readonly cursor?: string;
+  readonly query?: string;
+  readonly updatedAfter?: string;
+  readonly sessionId?: string;
+}
+
+/** One account-wide page. Organization selection only applies to new sessions. */
 export const listDevinCloudSessions = Effect.fn("listDevinCloudSessions")(function* (
   runtime: Pick<AcpSessionRuntime.AcpSessionRuntime["Service"], "initialize" | "request">,
+  input: DevinSessionPageInput = {},
 ) {
   yield* runtime.initialize();
-  const sessions: Array<DevinNativeSession> = [];
-  let cursor: string | undefined;
-  for (let page = 0; page < MAX_SESSION_LIST_PAGES; page++) {
-    const response = yield* runtime
-      .request("session/list", cursor ? { cursor } : {})
-      .pipe(Effect.flatMap(decodeListSessionsResponse));
-    for (const info of response.sessions) {
+  const response = yield* runtime
+    .request("session/list", {
+      ...(input.cursor ? { cursor: input.cursor } : {}),
+      _meta: {
+        "cognition.ai/limit": 50,
+        ...(input.query ? { "cognition.ai/content": input.query } : {}),
+        ...(input.updatedAfter ? { "cognition.ai/updatedAfter": input.updatedAfter } : {}),
+        ...(input.sessionId
+          ? { "cognition.ai/sessionIds": [input.sessionId], "cognition.ai/skipDiscovery": true }
+          : {}),
+      },
+    })
+    .pipe(Effect.flatMap(decodeListSessionsResponse));
+  return {
+    sessions: response.sessions.flatMap((info) => {
       const session = devinNativeSessionFromAcp(info);
-      if (session) sessions.push(session);
-    }
-    cursor = response.nextCursor?.trim() || undefined;
-    if (!cursor) break;
-  }
-  return sessions;
+      return session ? [session] : [];
+    }),
+    nextCursor: response.nextCursor?.trim() || null,
+  };
 });
 
 /**
