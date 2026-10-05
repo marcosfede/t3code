@@ -4,6 +4,7 @@ import type * as AcpCompat from "effect-acp/compat";
 
 import type * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
 import {
+  listDevinCloudSessions,
   buildDevinCloudAcpSpawnInput,
   devinCloudCatalogFromConfigOptions,
   devinNativeSessionFromAcp,
@@ -216,4 +217,88 @@ describe("makeDevinCloudReferenceRewriter", () => {
     const text = '`<ref_file file="/a.ts"/>`';
     expect(textOf(rewrite(chunk(text)))).toBe(text);
   });
+});
+
+describe("listDevinCloudSessions", () => {
+  const info = (sessionId: string, orgId: string) => ({
+    sessionId,
+    cwd: "/repo",
+    title: sessionId,
+    updatedAt: "2020-01-01T00:00:00Z",
+    _meta: { "cognition.ai/orgId": orgId },
+  });
+  it.effect(
+    "returns one page across organizations, including older sessions, without draining the cursor",
+    () =>
+      Effect.gen(function* () {
+        const requests: unknown[] = [];
+        const page = yield* listDevinCloudSessions({
+          initialize: () => Effect.succeed({ protocolVersion: 1 }),
+          request: (method, params) => {
+            requests.push({ method, params });
+            return Effect.succeed({
+              sessions: [info("one", "a"), info("two", "b")],
+              nextCursor: "next",
+            });
+          },
+        });
+        expect(page.sessions.map((session) => session.sessionId)).toEqual(["one", "two"]);
+        expect(page.nextCursor).toBe("next");
+        expect(requests).toEqual([
+          { method: "session/list", params: { _meta: { "cognition.ai/limit": 50 } } },
+        ]);
+      }),
+  );
+  it.effect("forwards pagination and search to Devin", () =>
+    Effect.gen(function* () {
+      const requests: unknown[] = [];
+      const page = yield* listDevinCloudSessions(
+        {
+          initialize: () => Effect.succeed({ protocolVersion: 1 }),
+          request: (method, params) => {
+            requests.push({ method, params });
+            return Effect.succeed({ sessions: [] });
+          },
+        },
+        { cursor: "page-two", query: "fix billing" },
+      );
+      expect(page.nextCursor).toBeNull();
+      expect(requests).toEqual([
+        {
+          method: "session/list",
+          params: {
+            cursor: "page-two",
+            _meta: { "cognition.ai/limit": 50, "cognition.ai/content": "fix billing" },
+          },
+        },
+      ]);
+    }),
+  );
+  it.effect("looks up an import directly instead of scanning account history", () =>
+    Effect.gen(function* () {
+      const requests: unknown[] = [];
+      yield* listDevinCloudSessions(
+        {
+          initialize: () => Effect.succeed({ protocolVersion: 1 }),
+          request: (method, params) => {
+            requests.push({ method, params });
+            return Effect.succeed({ sessions: [info("old-session", "b")] });
+          },
+        },
+        { sessionId: "old-session" },
+      );
+      expect(requests).toEqual([
+        {
+          method: "session/list",
+          params: {
+            _meta: {
+              "cognition.ai/limit": 50,
+              "cognition.ai/sessionIds": ["old-session"],
+              "cognition.ai/skipDiscovery": true,
+            },
+          },
+        },
+      ]);
+    }),
+  );
 });

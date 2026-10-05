@@ -8,7 +8,6 @@ import {
   type OrchestrationV2TurnItem,
   CommandId,
   DevinCloudSessionImportError,
-  matchesDevinSessionQuery,
   parseDevinCloudSessionId,
   ProviderDriverKind,
   type DevinCloudSessionImportInput,
@@ -63,21 +62,36 @@ export const devinCloudThreadId = (instance: ProviderInstance, sessionId: string
 
 /** Lists stored sessions across every enabled Devin Cloud instance, newest first. */
 export const listDevinCloudSessions = Effect.fn("DevinCloudSessions.list")(function* (
-  deps: Pick<DevinCloudSessionsDeps, "providerInstances">,
+  deps: {
+    readonly providerInstances: Pick<DevinCloudSessionsDeps["providerInstances"], "listInstances">;
+  },
   input: DevinSessionListInput,
 ) {
-  const instances = (yield* deps.providerInstances.listInstances).filter(isDevinCloudInstance);
+  const instances = (yield* deps.providerInstances.listInstances)
+    .filter(isDevinCloudInstance)
+    .filter(
+      (instance) =>
+        input.cursors === undefined ||
+        input.cursors.some((entry) => entry.providerInstanceId === instance.instanceId),
+    );
   const updatedAfter = input.updatedAfter ? Date.parse(input.updatedAfter) : undefined;
   const results = yield* Effect.forEach(
     instances,
     (instance) =>
-      instance.devinCloudSessions.list.pipe(
-        Effect.map((sessions) => ({ instance, sessions })),
-        Effect.result,
-      ),
+      instance.devinCloudSessions
+        .list({
+          ...(input.query ? { query: input.query } : {}),
+          ...(input.updatedAfter ? { updatedAfter: input.updatedAfter } : {}),
+          ...input.cursors?.find((entry) => entry.providerInstanceId === instance.instanceId),
+        })
+        .pipe(
+          Effect.map((page) => ({ instance, ...page })),
+          Effect.result,
+        ),
     { concurrency: "unbounded" },
   );
   const sessions: Array<DevinSessionSummary> = [];
+  const nextCursors: NonNullable<DevinSessionListResult["nextCursors"]>[number][] = [];
   const failures: Array<DevinSessionListResult["failures"][number]> = [];
   for (const [index, result] of results.entries()) {
     const instance = instances[index]!;
@@ -89,9 +103,13 @@ export const listDevinCloudSessions = Effect.fn("DevinCloudSessions.list")(funct
       failures.push({ providerInstanceId: instance.instanceId, detail: result.failure.detail });
       continue;
     }
+    if (result.success.nextCursor)
+      nextCursors.push({
+        providerInstanceId: instance.instanceId,
+        cursor: result.success.nextCursor,
+      });
     for (const session of result.success.sessions) {
       const summary = { ...session, providerInstanceId: instance.instanceId };
-      if (input.query && !matchesDevinSessionQuery(summary, input.query)) continue;
       if (
         updatedAfter !== undefined &&
         (session.updatedAt === null || Date.parse(session.updatedAt) < updatedAfter)
@@ -102,7 +120,7 @@ export const listDevinCloudSessions = Effect.fn("DevinCloudSessions.list")(funct
     }
   }
   sessions.sort((left, right) => (right.updatedAt ?? "").localeCompare(left.updatedAt ?? ""));
-  return { sessions, failures } satisfies DevinSessionListResult;
+  return { sessions, failures, nextCursors } satisfies DevinSessionListResult;
 });
 
 const importError = (detail: string) => new DevinCloudSessionImportError({ detail });
@@ -222,12 +240,14 @@ export const importDevinCloudSession = Effect.fn("DevinCloudSessions.import")(fu
   if (instance.devinCloudSessions === undefined) {
     return yield* importError("This provider cannot list Devin Cloud sessions.");
   }
-  const stored = yield* instance.devinCloudSessions.list.pipe(
-    Effect.mapError(() =>
-      importError("Could not reach Devin Cloud to look up the session. Try again."),
-    ),
-  );
-  const session = stored.find((candidate) => candidate.sessionId === sessionId);
+  const stored = yield* instance.devinCloudSessions
+    .list({ sessionId })
+    .pipe(
+      Effect.mapError(() =>
+        importError("Could not reach Devin Cloud to look up the session. Try again."),
+      ),
+    );
+  const session = stored.sessions.find((candidate) => candidate.sessionId === sessionId);
   if (session === undefined) {
     return yield* importError("No Devin Cloud session with that id was found in this account.");
   }

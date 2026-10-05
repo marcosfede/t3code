@@ -38,7 +38,7 @@ import type * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 
 import type { TextGeneration } from "../textGeneration/TextGeneration.ts";
-import type { DevinNativeSession } from "./acp/DevinCloudAcpSupport.ts";
+import type { DevinNativeSession, DevinSessionPageInput } from "./acp/DevinCloudAcpSupport.ts";
 import type { DevinCloudSessionHistory } from "./acp/DevinCloudHistory.ts";
 import type { ProviderAdapterV2Shape } from "../orchestration-v2/ProviderAdapter.ts";
 import type { ProviderDriverError } from "./Errors.ts";
@@ -102,7 +102,13 @@ export interface ProviderInstance {
   readonly auth?: ProviderAuthController;
   /** Sessions stored in the Devin Cloud account this instance signs in with. */
   readonly devinCloudSessions?: {
-    readonly list: Effect.Effect<ReadonlyArray<DevinNativeSession>, ProviderDriverError>;
+    readonly list: (input?: DevinSessionPageInput) => Effect.Effect<
+      {
+        readonly sessions: ReadonlyArray<DevinNativeSession>;
+        readonly nextCursor: string | null;
+      },
+      ProviderDriverError
+    >;
     /** Replays a stored session to recover its transcript. */
     readonly history: (
       session: DevinNativeSession,

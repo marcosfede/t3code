@@ -104,8 +104,15 @@ export const DevinSessionSummary = Schema.Struct({
 });
 export type DevinSessionSummary = typeof DevinSessionSummary.Type;
 
+const DevinSessionCursor = Schema.Struct({
+  providerInstanceId: ProviderInstanceId,
+  cursor: TrimmedNonEmptyString,
+});
+
 export const DevinSessionListInput = Schema.Struct({
-  /** Matches every stored session by title, ID, directory, excerpt or repository. */
+  /** Omit for the first page; subsequent requests only advance these providers. */
+  cursors: Schema.optionalKey(Schema.Array(DevinSessionCursor)),
+  /** Searches session titles and message content across account history. */
   query: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(200))),
   /** Without a query, keeps sessions updated at or after this instant. */
   updatedAfter: Schema.optionalKey(IsoDateTime),
@@ -114,6 +121,7 @@ export type DevinSessionListInput = typeof DevinSessionListInput.Type;
 
 export const DevinSessionListResult = Schema.Struct({
   sessions: Schema.Array(DevinSessionSummary),
+  nextCursors: Schema.optionalKey(Schema.Array(DevinSessionCursor)),
   /** Provider instances whose sessions could not be listed. */
   failures: Schema.Array(
     Schema.Struct({ providerInstanceId: ProviderInstanceId, detail: Schema.String }),

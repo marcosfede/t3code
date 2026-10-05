@@ -2,7 +2,7 @@ import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/models";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
-  matchesDevinSessionQuery,
+  type DevinSessionListInput,
   type DevinSessionSummary,
   type EnvironmentId,
   type ProjectId,
@@ -26,7 +26,7 @@ import {
   SearchIcon,
   type LucideIcon,
 } from "lucide-react";
-import { memo, useCallback, useContext, useMemo, useState } from "react";
+import { memo, useContext, useMemo, useState } from "react";
 
 import { isElectron } from "../../env";
 import { readLocalApi } from "../../localApi";
@@ -103,42 +103,82 @@ function sessionStatusPresentation(session: Pick<DevinSessionSummary, "status">)
   };
 }
 
-const RECENT_DAYS = 7;
 const SEARCH_DEBOUNCE_MS = 250;
 
-/**
- * Recent sessions by default; a search asks the server to match every stored session, keeping
- * the recent list on screen until it answers.
- */
-function useDevinSessionLists(
-  environmentIds: ReadonlyArray<EnvironmentId>,
-  updatedAfter: string,
-  query: string,
-) {
+/** Keep loaded pages visible while fetching the next page. */
+function useDevinSessionLists(environmentIds: ReadonlyArray<EnvironmentId>, query: string) {
   const registry = useContext(RegistryContext);
+  type Page = Record<string, DevinSessionListInput>;
+  const key = JSON.stringify([environmentIds, query]);
+  const firstPage = () => Object.fromEntries(environmentIds.map((id) => [id, { query }]));
+  const [pagination, setPagination] = useState<{ key: string; pages: Page[] }>(() => ({
+    key,
+    pages: [firstPage()],
+  }));
+  const pages = pagination.key === key ? pagination.pages : [firstPage()];
+  if (pagination.key !== key) setPagination({ key, pages });
   const listsAtom = useMemo(
     () =>
       Atom.make((get) =>
         environmentIds.map((environmentId) => {
-          const recentAtom = devinSessionList({ environmentId, input: { updatedAfter } });
-          const atom = query ? devinSessionList({ environmentId, input: { query } }) : recentAtom;
-          const result = get(atom);
-          const data = Option.getOrNull(AsyncResult.value(result));
-          const carried =
-            data === null && query ? Option.getOrNull(AsyncResult.value(get(recentAtom))) : null;
+          const atoms = pages.flatMap((page) => {
+            const input = page[environmentId];
+            return input ? [devinSessionList({ environmentId, input })] : [];
+          });
+          const results = atoms.map((atom) => get(atom));
+          const last = results.at(-1)!;
+          const data = results.flatMap((result) => {
+            const value = Option.getOrNull(AsyncResult.value(result));
+            return value ? [value] : [];
+          });
+          const latest = Option.getOrNull(AsyncResult.value(last));
+          const sessions = new Map(
+            data.flatMap((page) =>
+              page.sessions.map(
+                (session) =>
+                  [`${session.providerInstanceId}:${session.sessionId}`, session] as const,
+              ),
+            ),
+          );
           return {
             environmentId,
-            data: data ?? carried,
-            searching: carried !== null,
-            error: result._tag === "Failure" ? formatEnvironmentQueryError(result.cause) : null,
-            isPending: result.waiting || result._tag === "Initial",
-            refresh: () => registry.refresh(atom),
+            data: data.length
+              ? {
+                  sessions: [...sessions.values()],
+                  failures: data.flatMap((page) => page.failures),
+                }
+              : null,
+            nextCursors: latest?.nextCursors ?? [],
+            error: last._tag === "Failure" ? formatEnvironmentQueryError(last.cause) : null,
+            isPending: results.some((result) => result.waiting || result._tag === "Initial"),
           };
         }),
       ),
-    [environmentIds, updatedAfter, query, registry],
+    [environmentIds, pages],
   );
-  return useAtomValue(listsAtom);
+  const lists = useAtomValue(listsAtom);
+  return {
+    lists,
+    loadMore: () =>
+      setPagination({
+        key,
+        pages: [
+          ...pages,
+          Object.fromEntries(
+            lists
+              .filter((list) => list.nextCursors.length > 0)
+              .map((list) => [list.environmentId, { query, cursors: list.nextCursors }]),
+          ),
+        ],
+      }),
+    refresh: () => {
+      const page = firstPage();
+      setPagination({ key, pages: [page] });
+      for (const environmentId of environmentIds) {
+        registry.refresh(devinSessionList({ environmentId, input: page[environmentId]! }));
+      }
+    },
+  };
 }
 
 /** Lists the sessions of every Devin Cloud provider instance and opens them in T3. */
@@ -146,9 +186,6 @@ export function DevinSessionsPage() {
   const { environments } = useEnvironments();
   const projects = useProjects();
   const [query, setQuery] = useState("");
-  const [updatedAfter] = useState(() =>
-    new Date(Date.now() - RECENT_DAYS * 24 * 60 * 60 * 1000).toISOString(),
-  );
   const trimmedQuery = query.trim();
   const sentQuery = useDebouncedValue(trimmedQuery, SEARCH_DEBOUNCE_MS);
 
@@ -174,9 +211,10 @@ export function DevinSessionsPage() {
       ),
     [devinEnvironments],
   );
-  const lists = useDevinSessionLists(environmentIds, updatedAfter, sentQuery);
-  const searching = trimmedQuery !== sentQuery || lists.some((list) => list.searching);
-  const refreshing = !searching && lists.some((list) => list.isPending);
+  const { lists, loadMore, refresh } = useDevinSessionLists(environmentIds, sentQuery);
+  const refreshing = lists.some((list) => list.isPending);
+  const searching = trimmedQuery !== sentQuery || (sentQuery.length > 0 && refreshing);
+  const hasMore = lists.some((list) => list.nextCursors.length > 0);
   const showEnvironment = environmentIds.length > 1;
 
   const sessions = useMemo(
@@ -191,11 +229,13 @@ export function DevinSessionsPage() {
     [lists],
   );
   const groups = useMemo(() => {
-    const visible = sessions.filter((session) => matchesDevinSessionQuery(session, trimmedQuery));
+    const visible = [...sessions].sort((a, b) =>
+      (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""),
+    );
     return [{ key: "cloud", label: "Cloud", Icon: CloudIcon, sessions: visible }].filter(
       (group) => group.sessions.length > 0,
     );
-  }, [sessions, trimmedQuery]);
+  }, [sessions]);
   const shownCount = groups.reduce((count, group) => count + group.sessions.length, 0);
   const loadedOnce = lists.some((list) => list.data !== null);
   const listErrors = lists.flatMap((list) => (list.error ? [list.error] : []));
@@ -204,9 +244,6 @@ export function DevinSessionsPage() {
       (failure) => `${failure.providerInstanceId}: ${failure.detail}`,
     ),
   );
-  const refresh = useCallback(() => {
-    for (const list of lists) list.refresh();
-  }, [lists]);
   const projectsByEnvironment = useMemo(() => {
     const byEnvironment = new Map<EnvironmentId, Array<EnvironmentProject>>();
     for (const project of projects) {
@@ -239,12 +276,12 @@ export function DevinSessionsPage() {
             ? "Searching all sessions…"
             : trimmedQuery
               ? `Nothing matches “${trimmedQuery.length > 48 ? `${trimmedQuery.slice(0, 48)}…` : trimmedQuery}”`
-              : `No Devin sessions in the last ${RECENT_DAYS} days`
+              : "No Devin sessions"
         }
         description={
           trimmedQuery
-            ? "Search by title, repository, directory or session ID."
-            : "Search to find older sessions, or start one in Devin Cloud."
+            ? "Search by title or message content."
+            : "Start a session in Devin Cloud to see it here."
         }
         refreshing={refreshing || searching}
         onRetry={refresh}
@@ -290,10 +327,8 @@ export function DevinSessionsPage() {
               <Spinner aria-hidden size="sm" />
               Searching all sessions
             </span>
-          ) : trimmedQuery ? null : (
-            <span>
-              Showing activity from the last {RECENT_DAYS} days. Search to find older sessions.
-            </span>
+          ) : (
+            <span>Your sessions across all organizations, newest first.</span>
           )}
         </div>
       </div>
@@ -343,6 +378,13 @@ export function DevinSessionsPage() {
               </div>
 
               {listBody}
+              {hasMore ? (
+                <div className="flex justify-center py-3">
+                  <Button variant="outline" onClick={loadMore} disabled={refreshing || searching}>
+                    {refreshing ? "Loading…" : "Load more sessions"}
+                  </Button>
+                </div>
+              ) : null}
 
               {loadedOnce && (listErrors.length > 0 || providerFailures.length > 0) ? (
                 <div className="flex items-center justify-between gap-3 rounded-lg border border-warning/30 bg-warning-surface px-3 py-2 text-xs">

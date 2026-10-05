@@ -186,10 +186,13 @@ export const DevinCloudDriver: ProviderDriver<DevinCloudSettings, DevinCloudDriv
             ),
           ),
         devinCloudSessions: {
-          list: withRuntime("t3-code-session-list", listDevinCloudSessions).pipe(
-            Effect.timeout("45 seconds"),
-            Effect.mapError(driverError("Could not list Devin Cloud sessions.")),
-          ),
+          list: (input) =>
+            withRuntime("t3-code-session-list", (runtime) =>
+              listDevinCloudSessions(runtime, input),
+            ).pipe(
+              Effect.timeout("45 seconds"),
+              Effect.mapError(driverError("Could not list Devin Cloud sessions.")),
+            ),
           history: (session) =>
             Effect.gen(function* () {
               const history = makeDevinCloudHistory({
