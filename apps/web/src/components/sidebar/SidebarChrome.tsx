@@ -238,7 +238,7 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
           ) : null}
           {devinSupported ? (
             <SidebarUtilityItem
-              icon={<DevinIcon />}
+              icon={<DevinIcon className="[&_path]:fill-current" />}
               label="Devin sessions"
               onClick={handleDevinSessionsClick}
             />
