@@ -137,6 +137,8 @@ const RPC_AGGREGATES = {
   [WS_METHODS.filesystemBrowse]: "workspace",
   [WS_METHODS.agentSessionsScan]: "workspace",
   [WS_METHODS.agentSessionsImport]: "workspace",
+  [WS_METHODS.agentSessionsListDevin]: "workspace",
+  [WS_METHODS.agentSessionsImportDevinCloud]: "workspace",
   [WS_METHODS.assetsCreateUrl]: "workspace",
   [WS_METHODS.assetsPersistChatAttachments]: "orchestration",
   [WS_METHODS.attachmentsCreateUploadUrl]: "workspace",
