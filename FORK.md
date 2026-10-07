@@ -22,7 +22,7 @@ Rules:
 ## Devin
 
 - **V1 Local Devin is upstream's.** The local `devin acp` agent comes from upstream's ACP Registry provider (`agentId: devin`). The fork adds no local Devin provider. Check: no fork driver for local Devin; the registry lists Devin.
-- **V2 Devin Cloud provider.** A `devinCloud` provider runs remote Devin sessions through the Devin CLI (`devin acp --cloud`). Auth comes from `devin auth login`. A leftover legacy `credentialsPath` gives a clear error telling the user to log in with the CLI. Check: `apps/server/src/provider/Layers/DevinCloudProvider.test.ts`.
+- **V2 Devin Cloud provider.** A `devinCloud` provider runs remote Devin sessions through the Devin CLI (`devin acp --cloud`). Auth comes from `devin auth login`. A leftover legacy `credentialsPath` gives a clear error telling the user to log in with the CLI. Check: `apps/server/src/provider/DevinCloudProvider.test.ts`.
 - **V3 Health without side effects.** The provider status probe checks the CLI version, `devin auth status` and ACP `initialize`, and never creates a Cloud session. Check: `DevinCloudProvider.test.ts`.
 - **V4 Models.** The model list comes from the Cloud session's config options, with a fallback list and a `devin-cloud-default` alias. Check: `DevinCloudProvider.test.ts`, `packages/contracts/src/settings.test.ts`.
 - **V5 Organization.** The provider settings have an organization picker that loads the account's organizations when opened, and threads can override it. The organization is read-only after a thread's session starts, on web and mobile. Check: `apps/web/src/components/settings/ProviderSettingsForm.test.ts`, `apps/web/src/components/chat/TraitsPicker.test.ts`, `DevinCloudAcpSupport.test.ts`.
