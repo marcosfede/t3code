@@ -5,7 +5,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { expect } from "vite-plus/test";
 import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 
@@ -109,7 +109,7 @@ const fixture = Effect.fn("forkReleaseFixture")(function* (base = "0.0.40", tags
 });
 
 it.layer(NodeServices.layer)("fork release workflow", (it) => {
-  for (const { base, tags, expected } of [
+  it.effect.each([
     { base: "0.0.40", tags: [], expected: "0.0.40-fork.1" },
     { base: "0.0.40", tags: ["v0.0.40-fork.1", "v0.0.40-fork.2"], expected: "0.0.40-fork.3" },
     { base: "0.0.40", tags: ["v0.0.40-fork.2", "v0.0.40-fork.10"], expected: "0.0.40-fork.11" },
@@ -119,22 +119,20 @@ it.layer(NodeServices.layer)("fork release workflow", (it) => {
       tags: ["v0.0.40-fork.3", "v0.0.40-fork.99-extra", "v0.0.40-fork.abc"],
       expected: "0.0.40-fork.4",
     },
-  ]) {
-    it.effect(`allocates ${expected} from existing tags`, () =>
-      Effect.gen(function* () {
-        const test = yield* fixture(base, tags);
-        const result = yield* test.run();
-        expect(result.status, result.stderr).toBe(0);
-        expect(result.output).toEqual({
-          version: expected,
-          tag: `v${expected}`,
-          sha: yield* test.git("rev-parse", "HEAD"),
-          should_build: "true",
-        });
-        expect(yield* test.git("diff", "--name-only")).toBe("");
-      }),
-    );
-  }
+  ])("allocates $expected from existing tags", ({ base, tags, expected }) =>
+    Effect.gen(function* () {
+      const test = yield* fixture(base, tags);
+      const result = yield* test.run();
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.output).toEqual({
+        version: expected,
+        tag: `v${expected}`,
+        sha: yield* test.git("rev-parse", "HEAD"),
+        should_build: "true",
+      });
+      expect(yield* test.git("diff", "--name-only")).toBe("");
+    }),
+  );
 
   it.effect("accepts a higher explicitly requested revision", () =>
     Effect.gen(function* () {
@@ -145,7 +143,7 @@ it.layer(NodeServices.layer)("fork release workflow", (it) => {
     }),
   );
 
-  for (const RAW_VERSION of [
+  it.effect.each([
     "0.0.40-fork.2",
     "0.0.40-fork.1",
     "0.0.41-fork.3",
@@ -153,17 +151,15 @@ it.layer(NodeServices.layer)("fork release workflow", (it) => {
     "0.0.40-fork.03",
     "0.0.40-fork.0",
     "0.0.40-fork.3;exit 0",
-  ]) {
-    it.effect(`rejects invalid or non-increasing override ${RAW_VERSION}`, () =>
-      Effect.gen(function* () {
-        const test = yield* fixture("0.0.40", ["v0.0.40-fork.2"]);
-        const result = yield* test.run({ RAW_VERSION });
-        expect(result.status).not.toBe(0);
-        expect(result.stderr).toContain("Version must be");
-        expect(result.output.should_build).toBeUndefined();
-      }),
-    );
-  }
+  ])("rejects invalid or non-increasing override %s", (RAW_VERSION) =>
+    Effect.gen(function* () {
+      const test = yield* fixture("0.0.40", ["v0.0.40-fork.2"]);
+      const result = yield* test.run({ RAW_VERSION });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("Version must be");
+      expect(result.output.should_build).toBeUndefined();
+    }),
+  );
 
   it.effect("rejects an invalid desktop base version", () =>
     Effect.gen(function* () {
@@ -185,40 +181,38 @@ it.layer(NodeServices.layer)("fork release workflow", (it) => {
     }),
   );
 
-  for (const matches of [true, false]) {
-    it.effect(`marks only the current branch tip Latest: matches=${matches}`, () =>
-      Effect.gen(function* () {
-        const test = yield* fixture();
-        const sha = yield* test.git("rev-parse", "HEAD");
-        const capture = test.path.join(test.cwd, "publish-args");
-        const result = yield* test.command(
-          "bash",
-          [
-            "-c",
-            `
+  it.effect.each([true, false])("marks only the current branch tip Latest: matches=%s", (matches) =>
+    Effect.gen(function* () {
+      const test = yield* fixture();
+      const sha = yield* test.git("rev-parse", "HEAD");
+      const capture = test.path.join(test.cwd, "publish-args");
+      const result = yield* test.command(
+        "bash",
+        [
+          "-c",
+          `
         gh() {
           if [[ "$1" == "api" ]]; then printf '%s\\n' "$TEST_TIP";
           else printf '%s\\n' "$@" > "$TEST_CAPTURE"; fi
         }
         ${test.publishScript}
       `,
-          ],
-          {
-            TEST_TIP: matches ? sha : "different-tip",
-            TEST_CAPTURE: capture,
-            GITHUB_REPOSITORY: "owner/repo",
-            GITHUB_SHA: "pre-sync-event-sha",
-            RELEASE_SHA: sha,
-            TAG: "v0.0.40-fork.3",
-            VERSION: "0.0.40-fork.3",
-          },
-        );
-        expect(result.status, result.stderr).toBe(0);
-        const args = (yield* test.fs.readFileString(capture)).split("\n");
-        expect(args[args.indexOf("--target") + 1]).toBe(sha);
-        expect(args).toContain(`--latest=${matches}`);
-        expect(args).not.toContain("--prerelease");
-      }),
-    );
-  }
+        ],
+        {
+          TEST_TIP: matches ? sha : "different-tip",
+          TEST_CAPTURE: capture,
+          GITHUB_REPOSITORY: "owner/repo",
+          GITHUB_SHA: "pre-sync-event-sha",
+          RELEASE_SHA: sha,
+          TAG: "v0.0.40-fork.3",
+          VERSION: "0.0.40-fork.3",
+        },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      const args = (yield* test.fs.readFileString(capture)).split("\n");
+      expect(args[args.indexOf("--target") + 1]).toBe(sha);
+      expect(args).toContain(`--latest=${matches}`);
+      expect(args).not.toContain("--prerelease");
+    }),
+  );
 });
