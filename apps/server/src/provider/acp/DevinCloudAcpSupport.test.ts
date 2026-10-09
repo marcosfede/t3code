@@ -289,11 +289,13 @@ describe("listDevinCloudSessions", () => {
         {
           updatedAfter: "2026-10-01T00:00:00.000Z",
           filters: {
-            status: "finished",
-            sessionType: "sub_devin",
+            sessionType: "ada",
             automation: "not_automations",
-            origin: "slack",
+            origin: ["desktop", "devin_spaces"],
+            status: ["exit"],
+            prState: ["open", "merged"],
             archived: "all",
+            createdAfter: "2026-09-01T00:00:00.000Z",
           },
         },
       );
@@ -304,11 +306,13 @@ describe("listDevinCloudSessions", () => {
             _meta: {
               "cognition.ai/limit": 50,
               "cognition.ai/updatedAfter": "2026-10-01T00:00:00.000Z",
-              "cognition.ai/status": ["exit"],
-              "cognition.ai/sessionType": ["sub_devin"],
+              "cognition.ai/sessionType": ["ada"],
               "cognition.ai/automationFilter": "not_automations",
-              "cognition.ai/sessionOrigin": ["slack"],
+              "cognition.ai/sessionOrigin": ["desktop", "devin_spaces"],
+              "cognition.ai/status": ["exit"],
+              "cognition.ai/prState": ["open", "merged"],
               "cognition.ai/archivedStatus": "ALL",
+              "cognition.ai/createdAfter": "2026-09-01T00:00:00.000Z",
             },
           },
         },
