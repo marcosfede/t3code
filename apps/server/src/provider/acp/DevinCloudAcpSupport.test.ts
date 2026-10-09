@@ -86,16 +86,17 @@ describe("devinCloudCatalogFromConfigOptions", () => {
 });
 
 describe("devinNativeSessionFromAcp", () => {
-  it("maps Devin session metadata and hides archived sessions", () => {
+  it("maps Devin session metadata, dated by Devin's last-updated sort key", () => {
     expect(
       devinNativeSessionFromAcp({
         sessionId: " session-1 ",
         cwd: "/home/ubuntu",
         title: " Fix login ",
-        updatedAt: "2026-10-01T00:00:00.000Z",
+        updatedAt: "2026-10-01T00:30:00.000Z",
         _meta: {
           "cognition.ai/url": "https://app.devin.ai/sessions/session-1",
           "cognition.ai/statusEnum": "finished",
+          "cognition.ai/sortUpdatedAt": "2026-10-01T00:00:00.000Z",
           "cognition.ai/sessionRepos": [{ name: "marcosfede/t3code" }, { other: 1 }],
           "cognition.ai/messageExcerpts": "Done",
         },
@@ -112,11 +113,11 @@ describe("devinNativeSessionFromAcp", () => {
     });
     expect(
       devinNativeSessionFromAcp({
-        sessionId: "archived",
+        sessionId: "older-cli",
         cwd: "/",
-        _meta: { "cognition.ai/isArchived": true },
-      }),
-    ).toBeUndefined();
+        updatedAt: "2026-10-01T00:30:00.000Z",
+      })?.updatedAt,
+    ).toBe("2026-10-01T00:30:00.000Z");
   });
 });
 
@@ -269,6 +270,46 @@ describe("listDevinCloudSessions", () => {
           params: {
             cursor: "page-two",
             _meta: { "cognition.ai/limit": 50, "cognition.ai/content": "fix billing" },
+          },
+        },
+      ]);
+    }),
+  );
+  it.effect("translates list filters into Devin's session/list parameters", () =>
+    Effect.gen(function* () {
+      const requests: unknown[] = [];
+      yield* listDevinCloudSessions(
+        {
+          initialize: () => Effect.succeed({ protocolVersion: 1 }),
+          request: (method, params) => {
+            requests.push({ method, params });
+            return Effect.succeed({ sessions: [] });
+          },
+        },
+        {
+          updatedAfter: "2026-10-01T00:00:00.000Z",
+          filters: {
+            status: "finished",
+            sessionType: "sub_devin",
+            automation: "not_automations",
+            origin: "slack",
+            archived: "all",
+          },
+        },
+      );
+      expect(requests).toEqual([
+        {
+          method: "session/list",
+          params: {
+            _meta: {
+              "cognition.ai/limit": 50,
+              "cognition.ai/updatedAfter": "2026-10-01T00:00:00.000Z",
+              "cognition.ai/status": ["exit"],
+              "cognition.ai/sessionType": ["sub_devin"],
+              "cognition.ai/automationFilter": "not_automations",
+              "cognition.ai/sessionOrigin": ["slack"],
+              "cognition.ai/archivedStatus": "ALL",
+            },
           },
         },
       ]);

@@ -2,6 +2,7 @@ import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/models";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
+  type DevinSessionFilters,
   type DevinSessionListInput,
   type DevinSessionSummary,
   type EnvironmentId,
@@ -23,6 +24,7 @@ import {
   ExternalLinkIcon,
   FolderIcon,
   FolderGit2Icon,
+  ListFilterIcon,
   SearchIcon,
   type LucideIcon,
 } from "lucide-react";
@@ -55,6 +57,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { WorkspaceBreadcrumb, WorkspaceBreadcrumbItem } from "../WorkspaceBreadcrumb";
 import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
+import { DevinSessionFiltersMenu } from "./DevinSessionFiltersMenu";
 import { suggestDevinSessionProject } from "./devinSessions.logic";
 import { focusDevinImport } from "./focusDevinImport";
 
@@ -104,13 +107,17 @@ function sessionStatusPresentation(session: Pick<DevinSessionSummary, "status">)
 }
 
 const SEARCH_DEBOUNCE_MS = 250;
+const DAY_MS = 24 * 60 * 60 * 1_000;
 
 /** Keep loaded pages visible while fetching the next page. */
-function useDevinSessionLists(environmentIds: ReadonlyArray<EnvironmentId>, query: string) {
+function useDevinSessionLists(
+  environmentIds: ReadonlyArray<EnvironmentId>,
+  input: Omit<DevinSessionListInput, "cursors">,
+) {
   const registry = useContext(RegistryContext);
   type Page = Record<string, DevinSessionListInput>;
-  const key = JSON.stringify([environmentIds, query]);
-  const firstPage = () => Object.fromEntries(environmentIds.map((id) => [id, { query }]));
+  const key = JSON.stringify([environmentIds, input]);
+  const firstPage = () => Object.fromEntries(environmentIds.map((id) => [id, input]));
   const [pagination, setPagination] = useState<{ key: string; pages: Page[] }>(() => ({
     key,
     pages: [firstPage()],
@@ -167,7 +174,7 @@ function useDevinSessionLists(environmentIds: ReadonlyArray<EnvironmentId>, quer
           Object.fromEntries(
             lists
               .filter((list) => list.nextCursors.length > 0)
-              .map((list) => [list.environmentId, { query, cursors: list.nextCursors }]),
+              .map((list) => [list.environmentId, { ...input, cursors: list.nextCursors }]),
           ),
         ],
       }),
@@ -186,6 +193,8 @@ export function DevinSessionsPage() {
   const { environments } = useEnvironments();
   const projects = useProjects();
   const [query, setQuery] = useState("");
+  const [filters, setFilters] = useState<DevinSessionFilters>({});
+  const [updated, setUpdated] = useState<{ days: number; after: string } | null>(null);
   const trimmedQuery = query.trim();
   const sentQuery = useDebouncedValue(trimmedQuery, SEARCH_DEBOUNCE_MS);
 
@@ -211,7 +220,12 @@ export function DevinSessionsPage() {
       ),
     [devinEnvironments],
   );
-  const { lists, loadMore, refresh } = useDevinSessionLists(environmentIds, sentQuery);
+  const filtered = Object.keys(filters).length > 0 || updated !== null;
+  const { lists, loadMore, refresh } = useDevinSessionLists(environmentIds, {
+    query: sentQuery,
+    ...(Object.keys(filters).length > 0 ? { filters } : {}),
+    ...(updated ? { updatedAfter: updated.after } : {}),
+  });
   const refreshing = lists.some((list) => list.isPending);
   const searching = trimmedQuery !== sentQuery || (sentQuery.length > 0 && refreshing);
   const hasMore = lists.some((list) => list.nextCursors.length > 0);
@@ -276,16 +290,28 @@ export function DevinSessionsPage() {
             ? "Searching all sessions…"
             : trimmedQuery
               ? `Nothing matches “${trimmedQuery.length > 48 ? `${trimmedQuery.slice(0, 48)}…` : trimmedQuery}”`
-              : "No Devin sessions"
+              : filtered
+                ? "No sessions match these filters"
+                : "No Devin sessions"
         }
         description={
           trimmedQuery
             ? "Search by title or message content."
-            : "Start a session in Devin Cloud to see it here."
+            : filtered
+              ? "Change or clear the filters to see more sessions."
+              : "Start a session in Devin Cloud to see it here."
         }
         refreshing={refreshing || searching}
         onRetry={refresh}
         {...(trimmedQuery ? { onClearQuery: () => setQuery("") } : {})}
+        {...(filtered && !trimmedQuery
+          ? {
+              onClearFilters: () => {
+                setFilters({});
+                setUpdated(null);
+              },
+            }
+          : {})}
       />
     ) : (
       <div className="space-y-3">
@@ -366,6 +392,18 @@ export function DevinSessionsPage() {
                     aria-label="Search Devin sessions"
                   />
                 </InputGroup>
+                <DevinSessionFiltersMenu
+                  filters={filters}
+                  onFilters={setFilters}
+                  updatedWithinDays={updated?.days}
+                  onUpdatedWithinDays={(days) =>
+                    setUpdated(
+                      days === undefined
+                        ? null
+                        : { days, after: new Date(Date.now() - days * DAY_MS).toISOString() },
+                    )
+                  }
+                />
                 <Button
                   size="icon"
                   variant="outline"
@@ -604,12 +642,14 @@ function DevinSessionsEmptyState({
   refreshing = false,
   onRetry,
   onClearQuery,
+  onClearFilters,
 }: {
   title: string;
   description: string;
   refreshing?: boolean;
   onRetry?: () => void;
   onClearQuery?: () => void;
+  onClearFilters?: () => void;
 }) {
   return (
     <Empty>
@@ -620,12 +660,18 @@ function DevinSessionsEmptyState({
         <EmptyTitle>{title}</EmptyTitle>
         <EmptyDescription>{description}</EmptyDescription>
       </EmptyHeader>
-      {onRetry || onClearQuery ? (
+      {onRetry || onClearQuery || onClearFilters ? (
         <div className="flex flex-wrap justify-center gap-2">
           {onClearQuery ? (
             <Button size="sm" variant="outline" onClick={onClearQuery}>
               <SearchIcon className="size-3.5" />
               Clear search
+            </Button>
+          ) : null}
+          {onClearFilters ? (
+            <Button size="sm" variant="outline" onClick={onClearFilters}>
+              <ListFilterIcon className="size-3.5" />
+              Clear filters
             </Button>
           ) : null}
           {onRetry ? (
