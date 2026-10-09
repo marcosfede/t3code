@@ -82,6 +82,7 @@ export const listDevinCloudSessions = Effect.fn("DevinCloudSessions.list")(funct
         .list({
           ...(input.query ? { query: input.query } : {}),
           ...(input.updatedAfter ? { updatedAfter: input.updatedAfter } : {}),
+          ...(input.filters ? { filters: input.filters } : {}),
           ...input.cursors?.find((entry) => entry.providerInstanceId === instance.instanceId),
         })
         .pipe(

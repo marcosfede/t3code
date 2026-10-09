@@ -109,13 +109,44 @@ const DevinSessionCursor = Schema.Struct({
   cursor: TrimmedNonEmptyString,
 });
 
+export const DevinSessionOrigin = Schema.Literals([
+  "webapp",
+  "desktop",
+  "ios",
+  "cli",
+  "vscode_extension",
+  "slack",
+  "teams",
+  "linear",
+  "jira",
+  "api",
+  "scheduled",
+  "automation",
+  "code_scan",
+  "devin_spaces",
+  "pylon",
+]);
+export type DevinSessionOrigin = typeof DevinSessionOrigin.Type;
+
+/** Narrowings Devin applies server-side. An absent field leaves that dimension unfiltered. */
+export const DevinSessionFilters = Schema.Struct({
+  status: Schema.optionalKey(Schema.Literals(["running", "finished"])),
+  sessionType: Schema.optionalKey(Schema.Literals(["devin", "sub_devin", "ada", "code_scan"])),
+  automation: Schema.optionalKey(Schema.Literals(["automations", "not_automations"])),
+  origin: Schema.optionalKey(DevinSessionOrigin),
+  /** Devin lists only active sessions unless asked otherwise. */
+  archived: Schema.optionalKey(Schema.Literals(["archived", "all"])),
+});
+export type DevinSessionFilters = typeof DevinSessionFilters.Type;
+
 export const DevinSessionListInput = Schema.Struct({
   /** Omit for the first page; subsequent requests only advance these providers. */
   cursors: Schema.optionalKey(Schema.Array(DevinSessionCursor)),
   /** Searches session titles and message content across account history. */
   query: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(200))),
-  /** Without a query, keeps sessions updated at or after this instant. */
+  /** Keeps sessions last updated at or after this instant. */
   updatedAfter: Schema.optionalKey(IsoDateTime),
+  filters: Schema.optionalKey(DevinSessionFilters),
 });
 export type DevinSessionListInput = typeof DevinSessionListInput.Type;
 
