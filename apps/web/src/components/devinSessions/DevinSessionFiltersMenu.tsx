@@ -1,104 +1,147 @@
-import type { DevinSessionFilters, DevinSessionOrigin } from "@t3tools/contracts";
 import {
-  ArchiveIcon,
-  CalendarClockIcon,
+  CalendarIcon,
+  CalendarPlusIcon,
   CircleCheckIcon,
-  CircleDotIcon,
-  EyeOffIcon,
-  GitForkIcon,
   GlobeIcon,
-  InboxIcon,
-  LayersIcon,
   ListFilterIcon,
-  MessageSquareIcon,
-  SearchIcon,
-  ShieldCheckIcon,
+  LoaderIcon,
+  MessageCircleIcon,
   TimerIcon,
 } from "lucide-react";
+import type { ElementType } from "react";
 
 import {
   PullRequestFilterRadioSubmenu,
   type PullRequestFilterOption,
 } from "../pullRequest/PullRequestListFilters";
+import { PullRequestGlyph } from "../pullRequest/pullRequestIcons";
 import { Button } from "../ui/button";
-import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
+import {
+  Menu,
+  MenuCheckboxItem,
+  MenuItem,
+  MenuPopup,
+  MenuSeparator,
+  MenuSub,
+  MenuSubPopup,
+  MenuSubTrigger,
+  MenuTrigger,
+} from "../ui/menu";
+import {
+  countDevinSessionFilters,
+  DEVIN_DATE_PRESETS,
+  NO_DEVIN_SESSION_FILTERS,
+  type DevinDatePreset,
+  type DevinOriginFilter,
+  type DevinSessionFilterSelection,
+} from "./devinSessions.logic";
 
 /** MenuRadioGroup wants a string, so "unfiltered" wears one no Devin value can be. */
-const ANY = "any";
+const ALL = "all";
 
-const STATUS_OPTIONS = [
-  { value: ANY, label: "Any", Icon: LayersIcon },
-  { value: "running", label: "Running", Icon: CircleDotIcon },
-  { value: "finished", label: "Finished", Icon: CircleCheckIcon },
-] as const satisfies ReadonlyArray<PullRequestFilterOption<string>>;
+interface Option<Value extends string> {
+  readonly value: Value;
+  readonly label: string;
+}
 
-const SESSION_TYPE_OPTIONS = [
-  { value: ANY, label: "Any", Icon: LayersIcon },
-  { value: "devin", label: "Devin", Icon: MessageSquareIcon },
-  { value: "sub_devin", label: "Child sessions", Icon: GitForkIcon },
-  { value: "ada", label: "Ask Devin", Icon: SearchIcon },
-  { value: "code_scan", label: "Code scans", Icon: ShieldCheckIcon },
-] as const satisfies ReadonlyArray<PullRequestFilterOption<string>>;
-
-const AUTOMATION_OPTIONS = [
-  { value: ANY, label: "Any", Icon: LayersIcon },
-  { value: "automations", label: "Automations only", Icon: TimerIcon },
-  { value: "not_automations", label: "Hide automations", Icon: EyeOffIcon },
-] as const satisfies ReadonlyArray<PullRequestFilterOption<string>>;
-
-const ORIGIN_LABELS: Record<DevinSessionOrigin, string> = {
-  webapp: "Web app",
+const ORIGIN_LABELS: Record<DevinOriginFilter, string> = {
+  webapp: "Web",
+  api: "API",
+  cli: "CLI",
   desktop: "Desktop",
   ios: "iOS",
-  cli: "CLI",
-  vscode_extension: "VS Code",
-  slack: "Slack",
-  teams: "Teams",
-  linear: "Linear",
-  jira: "Jira",
-  api: "API",
-  scheduled: "Scheduled",
   automation: "Automation",
   code_scan: "Code scan",
-  devin_spaces: "Spaces",
+  slack: "Slack",
+  jira: "Jira",
+  linear: "Linear",
+  teams: "Teams",
   pylon: "Pylon",
 };
 
-const ORIGIN_OPTIONS: ReadonlyArray<PullRequestFilterOption<string>> = [
-  { value: ANY, label: "Any", Icon: LayersIcon },
-  ...Object.entries(ORIGIN_LABELS).map(([value, label]) => ({ value, label, Icon: GlobeIcon })),
-];
+const DATE_PRESET_LABELS: Record<DevinDatePreset, string> = {
+  today: "Today",
+  last_week: "Last week",
+  last_2_weeks: "Last 2 weeks",
+  last_month: "Last month",
+};
 
-const UPDATED_OPTIONS = [
-  { value: ANY, label: "Any time", Icon: LayersIcon },
-  { value: "1", label: "Past 24h", Icon: CalendarClockIcon },
-  { value: "7", label: "7 days", Icon: CalendarClockIcon },
-  { value: "30", label: "30 days", Icon: CalendarClockIcon },
-] as const satisfies ReadonlyArray<PullRequestFilterOption<string>>;
+function radioOptions<Value extends string>(
+  Icon: ElementType<{ className?: string }>,
+  options: ReadonlyArray<Option<Value>>,
+): ReadonlyArray<PullRequestFilterOption<Value | typeof ALL>> {
+  const all: Option<typeof ALL> = { value: ALL, label: "All" };
+  return [all, ...options].map((option) => ({ ...option, Icon }));
+}
 
-const ARCHIVED_OPTIONS = [
-  { value: ANY, label: "Active", Icon: InboxIcon },
-  { value: "archived", label: "Archived", Icon: ArchiveIcon },
-  { value: "all", label: "All", Icon: LayersIcon },
-] as const satisfies ReadonlyArray<PullRequestFilterOption<string>>;
+const AUTOMATION_OPTIONS = radioOptions(TimerIcon, [
+  { value: "automations", label: "Only automations" },
+  { value: "not_automations", label: "No automations" },
+]);
+const DATE_OPTIONS = DEVIN_DATE_PRESETS.map((value) => ({
+  value,
+  label: DATE_PRESET_LABELS[value],
+}));
 
-/** The subset of Devin's own session filters that Devin applies server-side. */
-export function DevinSessionFiltersMenu({
-  filters,
-  onFilters,
-  updatedWithinDays,
-  onUpdatedWithinDays,
+function CheckboxSubmenu<Value extends string>({
+  label,
+  Icon,
+  options,
+  value,
+  onChange,
 }: {
-  filters: DevinSessionFilters;
-  onFilters: (filters: DevinSessionFilters) => void;
-  updatedWithinDays: number | undefined;
-  onUpdatedWithinDays: (days: number | undefined) => void;
+  label: string;
+  Icon: ElementType<{ className?: string }>;
+  options: ReadonlyArray<Option<Value>>;
+  value: ReadonlyArray<Value>;
+  onChange: (value: ReadonlyArray<Value>) => void;
 }) {
-  const filterCount = Object.keys(filters).length + (updatedWithinDays === undefined ? 0 : 1);
-  const update = (key: keyof DevinSessionFilters, value: string) => {
-    const { [key]: _previous, ...rest } = filters;
-    onFilters(value === ANY ? rest : ({ ...rest, [key]: value } as DevinSessionFilters));
-  };
+  const [only] = value;
+  return (
+    <MenuSub>
+      <MenuSubTrigger>
+        <Icon aria-hidden className="size-3.5" />
+        <span className="flex-1">{label}</span>
+        <span className="text-xs text-muted-foreground">
+          {value.length === 0
+            ? "All"
+            : value.length === 1
+              ? options.find((option) => option.value === only)?.label
+              : `${value.length} selected`}
+        </span>
+      </MenuSubTrigger>
+      <MenuSubPopup>
+        {options.map((option) => (
+          <MenuCheckboxItem
+            key={option.value}
+            checked={value.includes(option.value)}
+            onCheckedChange={(checked) =>
+              onChange(
+                checked ? [...value, option.value] : value.filter((item) => item !== option.value),
+              )
+            }
+          >
+            {option.label}
+          </MenuCheckboxItem>
+        ))}
+      </MenuSubPopup>
+    </MenuSub>
+  );
+}
+
+/** The filters of Devin's own session list that its API can apply. */
+export function DevinSessionFiltersMenu({
+  selection,
+  onChange,
+}: {
+  selection: DevinSessionFilterSelection;
+  onChange: (selection: DevinSessionFilterSelection) => void;
+}) {
+  const filterCount = countDevinSessionFilters(selection);
+  const set = <Key extends keyof DevinSessionFilterSelection>(
+    key: Key,
+    value: DevinSessionFilterSelection[Key],
+  ) => onChange({ ...selection, [key]: value });
   return (
     <Menu>
       <MenuTrigger render={<Button variant="outline" />}>
@@ -111,53 +154,80 @@ export function DevinSessionFiltersMenu({
         ) : null}
       </MenuTrigger>
       <MenuPopup align="end" side="bottom">
-        <PullRequestFilterRadioSubmenu
-          label="Status"
-          value={filters.status ?? ANY}
-          options={STATUS_OPTIONS}
-          onChange={(value) => update("status", value)}
-        />
-        <PullRequestFilterRadioSubmenu
+        <CheckboxSubmenu
           label="Session type"
-          value={filters.sessionType ?? ANY}
-          options={SESSION_TYPE_OPTIONS}
-          onChange={(value) => update("sessionType", value)}
+          Icon={MessageCircleIcon}
+          options={[
+            { value: "agent", label: "Agent" },
+            { value: "ask", label: "Ask" },
+          ]}
+          value={selection.sessionType}
+          onChange={(value) => set("sessionType", value)}
         />
         <PullRequestFilterRadioSubmenu
           label="Automation"
-          value={filters.automation ?? ANY}
+          value={selection.automation ?? ALL}
           options={AUTOMATION_OPTIONS}
-          onChange={(value) => update("automation", value)}
+          onChange={(value) => set("automation", value === ALL ? null : value)}
         />
-        <PullRequestFilterRadioSubmenu
+        <CheckboxSubmenu
           label="Origin"
-          value={filters.origin ?? ANY}
-          options={ORIGIN_OPTIONS}
-          onChange={(value) => update("origin", value)}
+          Icon={GlobeIcon}
+          options={Object.entries(ORIGIN_LABELS).map(([value, label]) => ({
+            value: value as DevinOriginFilter,
+            label,
+          }))}
+          value={selection.origin}
+          onChange={(value) => set("origin", value)}
+        />
+        <CheckboxSubmenu
+          label="Status"
+          Icon={LoaderIcon}
+          options={[
+            { value: "running", label: "Running" },
+            { value: "exit", label: "Inactive" },
+          ]}
+          value={selection.status}
+          onChange={(value) => set("status", value)}
+        />
+        <CheckboxSubmenu
+          label="Pull requests"
+          Icon={PullRequestGlyph.pullRequest}
+          options={[
+            { value: "open", label: "Open" },
+            { value: "draft", label: "Draft" },
+            { value: "merged", label: "Merged" },
+            { value: "closed", label: "Closed" },
+          ]}
+          value={selection.prState}
+          onChange={(value) => set("prState", value)}
+        />
+        <CheckboxSubmenu
+          label="Done"
+          Icon={CircleCheckIcon}
+          options={[
+            { value: "done", label: "Done" },
+            { value: "notDone", label: "Not done" },
+          ]}
+          value={selection.done}
+          onChange={(value) => set("done", value)}
         />
         <PullRequestFilterRadioSubmenu
-          label="Updated"
-          value={updatedWithinDays === undefined ? ANY : String(updatedWithinDays)}
-          options={UPDATED_OPTIONS}
-          onChange={(value) => onUpdatedWithinDays(value === ANY ? undefined : Number(value))}
+          label="Created time"
+          value={selection.createdTime ?? ALL}
+          options={radioOptions(CalendarIcon, DATE_OPTIONS)}
+          onChange={(value) => set("createdTime", value === ALL ? null : value)}
         />
         <PullRequestFilterRadioSubmenu
-          label="Archive"
-          value={filters.archived ?? ANY}
-          options={ARCHIVED_OPTIONS}
-          onChange={(value) => update("archived", value)}
+          label="Updated time"
+          value={selection.updatedTime ?? ALL}
+          options={radioOptions(CalendarPlusIcon, DATE_OPTIONS)}
+          onChange={(value) => set("updatedTime", value === ALL ? null : value)}
         />
         {filterCount > 0 ? (
           <>
             <MenuSeparator />
-            <MenuItem
-              onClick={() => {
-                onFilters({});
-                onUpdatedWithinDays(undefined);
-              }}
-            >
-              Clear filters
-            </MenuItem>
+            <MenuItem onClick={() => onChange(NO_DEVIN_SESSION_FILTERS)}>Clear filters</MenuItem>
           </>
         ) : null}
       </MenuPopup>
