@@ -23,6 +23,7 @@ import {
   ExternalLinkIcon,
   FolderIcon,
   FolderGit2Icon,
+  ListFilterIcon,
   SearchIcon,
   type LucideIcon,
 } from "lucide-react";
@@ -55,7 +56,13 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { WorkspaceBreadcrumb, WorkspaceBreadcrumbItem } from "../WorkspaceBreadcrumb";
 import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
-import { suggestDevinSessionProject } from "./devinSessions.logic";
+import { DevinSessionFiltersMenu } from "./DevinSessionFiltersMenu";
+import {
+  countDevinSessionFilters,
+  devinSessionListFilters,
+  NO_DEVIN_SESSION_FILTERS,
+  suggestDevinSessionProject,
+} from "./devinSessions.logic";
 import { focusDevinImport } from "./focusDevinImport";
 
 const DEVIN_DRIVERS = new Set(["devinCloud"]);
@@ -106,11 +113,14 @@ function sessionStatusPresentation(session: Pick<DevinSessionSummary, "status">)
 const SEARCH_DEBOUNCE_MS = 250;
 
 /** Keep loaded pages visible while fetching the next page. */
-function useDevinSessionLists(environmentIds: ReadonlyArray<EnvironmentId>, query: string) {
+function useDevinSessionLists(
+  environmentIds: ReadonlyArray<EnvironmentId>,
+  input: Omit<DevinSessionListInput, "cursors">,
+) {
   const registry = useContext(RegistryContext);
   type Page = Record<string, DevinSessionListInput>;
-  const key = JSON.stringify([environmentIds, query]);
-  const firstPage = () => Object.fromEntries(environmentIds.map((id) => [id, { query }]));
+  const key = JSON.stringify([environmentIds, input]);
+  const firstPage = () => Object.fromEntries(environmentIds.map((id) => [id, input]));
   const [pagination, setPagination] = useState<{ key: string; pages: Page[] }>(() => ({
     key,
     pages: [firstPage()],
@@ -167,7 +177,7 @@ function useDevinSessionLists(environmentIds: ReadonlyArray<EnvironmentId>, quer
           Object.fromEntries(
             lists
               .filter((list) => list.nextCursors.length > 0)
-              .map((list) => [list.environmentId, { query, cursors: list.nextCursors }]),
+              .map((list) => [list.environmentId, { ...input, cursors: list.nextCursors }]),
           ),
         ],
       }),
@@ -186,6 +196,9 @@ export function DevinSessionsPage() {
   const { environments } = useEnvironments();
   const projects = useProjects();
   const [query, setQuery] = useState("");
+  const [filters, setFilters] = useState(NO_DEVIN_SESSION_FILTERS);
+  // Presets resolve when chosen; resolving per render would refetch every render.
+  const listFilters = useMemo(() => devinSessionListFilters(filters, new Date()), [filters]);
   const trimmedQuery = query.trim();
   const sentQuery = useDebouncedValue(trimmedQuery, SEARCH_DEBOUNCE_MS);
 
@@ -211,7 +224,11 @@ export function DevinSessionsPage() {
       ),
     [devinEnvironments],
   );
-  const { lists, loadMore, refresh } = useDevinSessionLists(environmentIds, sentQuery);
+  const filtered = countDevinSessionFilters(filters) > 0;
+  const { lists, loadMore, refresh } = useDevinSessionLists(environmentIds, {
+    query: sentQuery,
+    ...listFilters,
+  });
   const refreshing = lists.some((list) => list.isPending);
   const searching = trimmedQuery !== sentQuery || (sentQuery.length > 0 && refreshing);
   const hasMore = lists.some((list) => list.nextCursors.length > 0);
@@ -276,16 +293,25 @@ export function DevinSessionsPage() {
             ? "Searching all sessions…"
             : trimmedQuery
               ? `Nothing matches “${trimmedQuery.length > 48 ? `${trimmedQuery.slice(0, 48)}…` : trimmedQuery}”`
-              : "No Devin sessions"
+              : filtered
+                ? "No sessions match these filters"
+                : "No Devin sessions"
         }
         description={
           trimmedQuery
             ? "Search by title or message content."
-            : "Start a session in Devin Cloud to see it here."
+            : filtered
+              ? "Change or clear the filters to see more sessions."
+              : "Start a session in Devin Cloud to see it here."
         }
         refreshing={refreshing || searching}
         onRetry={refresh}
         {...(trimmedQuery ? { onClearQuery: () => setQuery("") } : {})}
+        {...(filtered && !trimmedQuery
+          ? {
+              onClearFilters: () => setFilters(NO_DEVIN_SESSION_FILTERS),
+            }
+          : {})}
       />
     ) : (
       <div className="space-y-3">
@@ -366,6 +392,7 @@ export function DevinSessionsPage() {
                     aria-label="Search Devin sessions"
                   />
                 </InputGroup>
+                <DevinSessionFiltersMenu selection={filters} onChange={setFilters} />
                 <Button
                   size="icon"
                   variant="outline"
@@ -604,12 +631,14 @@ function DevinSessionsEmptyState({
   refreshing = false,
   onRetry,
   onClearQuery,
+  onClearFilters,
 }: {
   title: string;
   description: string;
   refreshing?: boolean;
   onRetry?: () => void;
   onClearQuery?: () => void;
+  onClearFilters?: () => void;
 }) {
   return (
     <Empty>
@@ -620,12 +649,18 @@ function DevinSessionsEmptyState({
         <EmptyTitle>{title}</EmptyTitle>
         <EmptyDescription>{description}</EmptyDescription>
       </EmptyHeader>
-      {onRetry || onClearQuery ? (
+      {onRetry || onClearQuery || onClearFilters ? (
         <div className="flex flex-wrap justify-center gap-2">
           {onClearQuery ? (
             <Button size="sm" variant="outline" onClick={onClearQuery}>
               <SearchIcon className="size-3.5" />
               Clear search
+            </Button>
+          ) : null}
+          {onClearFilters ? (
+            <Button size="sm" variant="outline" onClick={onClearFilters}>
+              <ListFilterIcon className="size-3.5" />
+              Clear filters
             </Button>
           ) : null}
           {onRetry ? (

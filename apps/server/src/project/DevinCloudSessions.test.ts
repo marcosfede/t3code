@@ -55,7 +55,7 @@ describe("Devin Cloud session pages", () => {
       }),
   );
 
-  it.effect("only advances unfinished providers and keeps server-side content matches", () =>
+  it.effect("only advances unfinished providers and forwards search and filters", () =>
     Effect.gen(function* () {
       const requests: (DevinSessionPageInput | undefined)[] = [];
       const result = yield* listDevinCloudSessions(
@@ -68,10 +68,18 @@ describe("Devin Cloud session pages", () => {
         ]),
         {
           query: "match in a message",
+          filters: { status: ["running"], origin: ["slack"] },
           cursors: [{ providerInstanceId: ProviderInstanceId.make("b"), cursor: "b-next" }],
         },
       );
-      expect(requests).toMatchObject([{ query: "match in a message", cursor: "b-next" }]);
+      expect(requests).toEqual([
+        {
+          query: "match in a message",
+          filters: { status: ["running"], origin: ["slack"] },
+          providerInstanceId: "b",
+          cursor: "b-next",
+        },
+      ]);
       expect(result.sessions).toHaveLength(1);
       expect(result.nextCursors).toEqual([]);
     }),

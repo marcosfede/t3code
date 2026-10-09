@@ -1,4 +1,8 @@
-import type { DevinCloudSettings, ProviderOptionSelection } from "@t3tools/contracts";
+import type {
+  DevinCloudSettings,
+  DevinSessionFilters,
+  ProviderOptionSelection,
+} from "@t3tools/contracts";
 import { getProviderOptionStringSelectionValue } from "@t3tools/shared/model";
 import type * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -234,14 +238,15 @@ export function devinNativeSessionFromAcp(
   info: EffectAcpSchema.SessionInfo,
 ): DevinNativeSession | undefined {
   const meta = info._meta ?? {};
-  if (meta["cognition.ai/isArchived"] === true) return undefined;
   const sessionId = info.sessionId.trim();
   if (!sessionId) return undefined;
   return {
     sessionId,
     title: info.title?.trim() || null,
     cwd: info.cwd.trim() || null,
-    updatedAt: info.updatedAt ?? null,
+    // `updatedAt` also moves when Devin suspends an idle session, about 30 minutes after the
+    // last activity. Devin's own list orders by `sortUpdatedAt`.
+    updatedAt: metaString(meta, "cognition.ai/sortUpdatedAt") ?? info.updatedAt ?? null,
     url: metaString(meta, "cognition.ai/url"),
     status: metaString(meta, "cognition.ai/statusEnum"),
     repositories: metaRepositories(meta),
@@ -255,7 +260,22 @@ export interface DevinSessionPageInput {
   readonly cursor?: string;
   readonly query?: string;
   readonly updatedAfter?: string;
+  readonly filters?: DevinSessionFilters;
   readonly sessionId?: string;
+}
+
+function devinSessionFilterMeta(filters: DevinSessionFilters = {}) {
+  return {
+    ...(filters.sessionType ? { "cognition.ai/sessionType": [filters.sessionType] } : {}),
+    ...(filters.automation ? { "cognition.ai/automationFilter": filters.automation } : {}),
+    ...(filters.origin?.length ? { "cognition.ai/sessionOrigin": filters.origin } : {}),
+    ...(filters.status?.length ? { "cognition.ai/status": filters.status } : {}),
+    ...(filters.prState?.length ? { "cognition.ai/prState": filters.prState } : {}),
+    ...(filters.archived
+      ? { "cognition.ai/archivedStatus": filters.archived === "all" ? "ALL" : "ARCHIVED" }
+      : {}),
+    ...(filters.createdAfter ? { "cognition.ai/createdAfter": filters.createdAfter } : {}),
+  };
 }
 
 /** One account-wide page. Organization selection only applies to new sessions. */
@@ -271,6 +291,7 @@ export const listDevinCloudSessions = Effect.fn("listDevinCloudSessions")(functi
         "cognition.ai/limit": 50,
         ...(input.query ? { "cognition.ai/content": input.query } : {}),
         ...(input.updatedAfter ? { "cognition.ai/updatedAfter": input.updatedAfter } : {}),
+        ...devinSessionFilterMeta(input.filters),
         ...(input.sessionId
           ? { "cognition.ai/sessionIds": [input.sessionId], "cognition.ai/skipDiscovery": true }
           : {}),
