@@ -68,14 +68,14 @@ describe("Devin Cloud session pages", () => {
         ]),
         {
           query: "match in a message",
-          filters: { status: "running", origin: "slack" },
+          filters: { status: ["running"], origin: ["slack"] },
           cursors: [{ providerInstanceId: ProviderInstanceId.make("b"), cursor: "b-next" }],
         },
       );
       expect(requests).toEqual([
         {
           query: "match in a message",
-          filters: { status: "running", origin: "slack" },
+          filters: { status: ["running"], origin: ["slack"] },
           providerInstanceId: "b",
           cursor: "b-next",
         },

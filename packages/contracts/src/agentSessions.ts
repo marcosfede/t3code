@@ -130,12 +130,14 @@ export type DevinSessionOrigin = typeof DevinSessionOrigin.Type;
 
 /** Narrowings Devin applies server-side. An absent field leaves that dimension unfiltered. */
 export const DevinSessionFilters = Schema.Struct({
-  status: Schema.optionalKey(Schema.Literals(["running", "finished"])),
-  sessionType: Schema.optionalKey(Schema.Literals(["devin", "sub_devin", "ada", "code_scan"])),
+  sessionType: Schema.optionalKey(Schema.Literals(["devin", "ada"])),
   automation: Schema.optionalKey(Schema.Literals(["automations", "not_automations"])),
-  origin: Schema.optionalKey(DevinSessionOrigin),
+  origin: Schema.optionalKey(Schema.Array(DevinSessionOrigin)),
+  status: Schema.optionalKey(Schema.Array(Schema.Literals(["running", "exit"]))),
+  prState: Schema.optionalKey(Schema.Array(Schema.Literals(["open", "draft", "merged", "closed"]))),
   /** Devin lists only active sessions unless asked otherwise. */
   archived: Schema.optionalKey(Schema.Literals(["archived", "all"])),
+  createdAfter: Schema.optionalKey(IsoDateTime),
 });
 export type DevinSessionFilters = typeof DevinSessionFilters.Type;
 

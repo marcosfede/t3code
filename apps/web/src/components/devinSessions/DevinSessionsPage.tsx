@@ -2,7 +2,6 @@ import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/models";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
-  type DevinSessionFilters,
   type DevinSessionListInput,
   type DevinSessionSummary,
   type EnvironmentId,
@@ -58,7 +57,12 @@ import { WorkspaceBreadcrumb, WorkspaceBreadcrumbItem } from "../WorkspaceBreadc
 import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { DevinSessionFiltersMenu } from "./DevinSessionFiltersMenu";
-import { suggestDevinSessionProject } from "./devinSessions.logic";
+import {
+  countDevinSessionFilters,
+  devinSessionListFilters,
+  NO_DEVIN_SESSION_FILTERS,
+  suggestDevinSessionProject,
+} from "./devinSessions.logic";
 import { focusDevinImport } from "./focusDevinImport";
 
 const DEVIN_DRIVERS = new Set(["devinCloud"]);
@@ -107,7 +111,6 @@ function sessionStatusPresentation(session: Pick<DevinSessionSummary, "status">)
 }
 
 const SEARCH_DEBOUNCE_MS = 250;
-const DAY_MS = 24 * 60 * 60 * 1_000;
 
 /** Keep loaded pages visible while fetching the next page. */
 function useDevinSessionLists(
@@ -193,8 +196,9 @@ export function DevinSessionsPage() {
   const { environments } = useEnvironments();
   const projects = useProjects();
   const [query, setQuery] = useState("");
-  const [filters, setFilters] = useState<DevinSessionFilters>({});
-  const [updated, setUpdated] = useState<{ days: number; after: string } | null>(null);
+  const [filters, setFilters] = useState(NO_DEVIN_SESSION_FILTERS);
+  // Presets resolve when chosen; resolving per render would refetch every render.
+  const listFilters = useMemo(() => devinSessionListFilters(filters, new Date()), [filters]);
   const trimmedQuery = query.trim();
   const sentQuery = useDebouncedValue(trimmedQuery, SEARCH_DEBOUNCE_MS);
 
@@ -220,11 +224,10 @@ export function DevinSessionsPage() {
       ),
     [devinEnvironments],
   );
-  const filtered = Object.keys(filters).length > 0 || updated !== null;
+  const filtered = countDevinSessionFilters(filters) > 0;
   const { lists, loadMore, refresh } = useDevinSessionLists(environmentIds, {
     query: sentQuery,
-    ...(Object.keys(filters).length > 0 ? { filters } : {}),
-    ...(updated ? { updatedAfter: updated.after } : {}),
+    ...listFilters,
   });
   const refreshing = lists.some((list) => list.isPending);
   const searching = trimmedQuery !== sentQuery || (sentQuery.length > 0 && refreshing);
@@ -306,10 +309,7 @@ export function DevinSessionsPage() {
         {...(trimmedQuery ? { onClearQuery: () => setQuery("") } : {})}
         {...(filtered && !trimmedQuery
           ? {
-              onClearFilters: () => {
-                setFilters({});
-                setUpdated(null);
-              },
+              onClearFilters: () => setFilters(NO_DEVIN_SESSION_FILTERS),
             }
           : {})}
       />
@@ -392,18 +392,7 @@ export function DevinSessionsPage() {
                     aria-label="Search Devin sessions"
                   />
                 </InputGroup>
-                <DevinSessionFiltersMenu
-                  filters={filters}
-                  onFilters={setFilters}
-                  updatedWithinDays={updated?.days}
-                  onUpdatedWithinDays={(days) =>
-                    setUpdated(
-                      days === undefined
-                        ? null
-                        : { days, after: new Date(Date.now() - days * DAY_MS).toISOString() },
-                    )
-                  }
-                />
+                <DevinSessionFiltersMenu selection={filters} onChange={setFilters} />
                 <Button
                   size="icon"
                   variant="outline"

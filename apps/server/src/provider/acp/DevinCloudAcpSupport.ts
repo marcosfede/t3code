@@ -264,17 +264,17 @@ export interface DevinSessionPageInput {
   readonly sessionId?: string;
 }
 
-const DEVIN_STATUS_FILTER = { running: ["running"], finished: ["exit"] } as const;
-
 function devinSessionFilterMeta(filters: DevinSessionFilters = {}) {
   return {
-    ...(filters.status ? { "cognition.ai/status": DEVIN_STATUS_FILTER[filters.status] } : {}),
     ...(filters.sessionType ? { "cognition.ai/sessionType": [filters.sessionType] } : {}),
     ...(filters.automation ? { "cognition.ai/automationFilter": filters.automation } : {}),
-    ...(filters.origin ? { "cognition.ai/sessionOrigin": [filters.origin] } : {}),
+    ...(filters.origin?.length ? { "cognition.ai/sessionOrigin": filters.origin } : {}),
+    ...(filters.status?.length ? { "cognition.ai/status": filters.status } : {}),
+    ...(filters.prState?.length ? { "cognition.ai/prState": filters.prState } : {}),
     ...(filters.archived
       ? { "cognition.ai/archivedStatus": filters.archived === "all" ? "ALL" : "ARCHIVED" }
       : {}),
+    ...(filters.createdAfter ? { "cognition.ai/createdAfter": filters.createdAfter } : {}),
   };
 }
 
