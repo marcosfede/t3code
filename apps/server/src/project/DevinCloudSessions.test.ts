@@ -2,18 +2,19 @@ import { describe, expect, it } from "@effect/vitest";
 import { ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
-import type { ProviderInstance } from "../provider/ProviderDriver.ts";
+import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
+import type { DevinCloudSessionsAccess } from "../provider/Drivers/DevinCloudDriver.ts";
 import type { DevinSessionPageInput } from "../provider/acp/DevinCloudAcpSupport.ts";
 import { ProviderDriverError } from "../provider/Errors.ts";
 import { listDevinCloudSessions } from "./DevinCloudSessions.ts";
 
-const instance = (id: string, list: NonNullable<ProviderInstance["devinCloudSessions"]>["list"]) =>
+const instance = (id: string, list: DevinCloudSessionsAccess["list"]) =>
   ({
     instanceId: ProviderInstanceId.make(id),
     driverKind: ProviderDriverKind.make("devinCloud"),
     enabled: true,
     devinCloudSessions: { list },
-  }) as ProviderInstance;
+  }) as unknown as ProviderInstance;
 
 const deps = (instances: ProviderInstance[]) =>
   ({

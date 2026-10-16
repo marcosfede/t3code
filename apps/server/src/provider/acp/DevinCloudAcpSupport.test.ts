@@ -2,7 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import type * as AcpCompat from "effect-acp/compat";
 
-import type * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
+import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 import {
   listDevinCloudSessions,
   buildDevinCloudAcpSpawnInput,

@@ -29,7 +29,7 @@ import {
   providerModelsFromSettings,
   spawnAndCollect,
   type ServerProviderDraft,
-} from "./providerSnapshot.ts";
+} from "@t3tools/provider-core/server/snapshotProbe";
 import {
   DEVIN_CLOUD_CREDENTIALS_MIGRATION_MESSAGE,
   DEVIN_CLOUD_ORGANIZATION_OPTION_ID,
@@ -37,7 +37,7 @@ import {
   type DevinCloudConfigCatalog,
   makeDevinCloudAcpRuntime,
 } from "./acp/DevinCloudAcpSupport.ts";
-import type { ServerProviderShape } from "./ServerProvider.ts";
+import type { ManagedServerProvider } from "@t3tools/provider-core/server/snapshot";
 
 const DEVIN_CLOUD_PRESENTATION = {
   displayName: "Devin Cloud",
@@ -154,7 +154,7 @@ export const makeDevinCloudCatalog = Effect.fn("makeDevinCloudCatalog")(function
       SubscriptionRef.get(catalog),
       (current) => current.organizations !== undefined,
     ),
-    decorate: (source: ServerProviderShape): ServerProviderShape => {
+    decorate: (source: ManagedServerProvider): ManagedServerProvider => {
       const getSnapshot = source.getSnapshot.pipe(Effect.flatMap(apply));
       return {
         ...source,

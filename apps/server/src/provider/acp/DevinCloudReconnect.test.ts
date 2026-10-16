@@ -8,7 +8,7 @@ import * as Stream from "effect/Stream";
 import * as AcpErrors from "effect-acp/errors";
 import type * as AcpCompat from "effect-acp/compat";
 
-import type * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
+import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 import { makeDevinCloudReconnect, type DevinCloudConnectOptions } from "./DevinCloudReconnect.ts";
 
 type Runtime = AcpSessionRuntime.AcpSessionRuntime["Service"];

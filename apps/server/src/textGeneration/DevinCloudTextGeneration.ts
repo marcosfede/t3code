@@ -18,5 +18,6 @@ export function makeDevinCloudTextGeneration(): TextGeneration.TextGeneration["S
     generatePrContent: () => unsupported("generatePrContent"),
     generateBranchName: () => unsupported("generateBranchName"),
     generateThreadTitle: () => unsupported("generateThreadTitle"),
+    generateReviewGuide: () => unsupported("generateReviewGuide"),
   };
 }
