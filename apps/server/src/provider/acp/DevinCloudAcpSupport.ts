@@ -15,7 +15,7 @@ import * as EffectAcpErrors from "effect-acp/errors";
 import type * as AcpCompat from "effect-acp/compat";
 import * as EffectAcpSchema from "effect-acp/schema";
 
-import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
+import * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 
 export const DEVIN_CLOUD_ORGANIZATION_OPTION_ID = "org_id";
 export const DEVIN_CLOUD_CREDENTIALS_MIGRATION_MESSAGE =

@@ -123,8 +123,8 @@ describe("ProviderSettingsForm helpers", () => {
   it.each(["devinCloud"])(
     "selects organizations by name and clears the override for %s",
     (driver) => {
-      const cloud = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make(driver)]!;
-      const local = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("codex")]!;
+      const cloud = providerClients.get(ProviderDriverKind.make(driver))!;
+      const local = providerClients.get(ProviderDriverKind.make("codex"))!;
       const field = deriveProviderSettingsFields(cloud, undefined, [
         { id: "org-selected", name: "Work" },
       ]).find((field) => field.key === "organizationId");
@@ -154,7 +154,7 @@ describe("ProviderSettingsForm helpers", () => {
     },
   );
   it("configures the cloud CLI and clears legacy credentials without losing organization settings", () => {
-    const cloud = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("devinCloud")]!;
+    const cloud = providerClients.get(ProviderDriverKind.make("devinCloud"))!;
     const fields = deriveProviderSettingsFields(cloud);
     const binary = fields.find((field) => field.key === "binaryPath")!;
     const credentials = fields.find((field) => field.key === "credentialsPath")!;

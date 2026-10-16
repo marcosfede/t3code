@@ -2,7 +2,7 @@ import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import type * as AcpCompat from "effect-acp/compat";
 
-import { acpContentBlockDisplayText } from "./AcpRuntimeModel.ts";
+import { acpContentBlockDisplayText } from "@t3tools/provider-acp/server/runtimeModel";
 import {
   makeDevinCloudReferenceRewriter,
   normalizeDevinCloudUserMessage,

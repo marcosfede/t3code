@@ -7,7 +7,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { expect } from "vite-plus/test";
-import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 function shellStep(workflow: string, marker: string) {
   const start = workflow.indexOf(marker);
@@ -38,7 +38,7 @@ const fixture = Effect.fn("forkReleaseFixture")(function* (base = "0.0.40", tags
   const publishScript = shellStep(workflow, "      - name: Create release\n");
   const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-fork-release-" });
   const env = {
-    PATH: (yield* HostProcessEnvironment).PATH ?? "",
+    PATH: (yield* HostProcess.Environment).PATH ?? "",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_AUTHOR_NAME: "Release test",

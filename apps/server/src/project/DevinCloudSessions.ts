@@ -23,11 +23,12 @@ import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 
 import type * as EventSink from "../orchestration-v2/EventSink.ts";
-import * as IdAllocator from "../orchestration-v2/IdAllocator.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type { DevinCloudHistoryMessage } from "../provider/acp/DevinCloudHistory.ts";
 import type * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import type * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
-import type { ProviderInstance } from "../provider/ProviderDriver.ts";
+import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
+import type { DevinCloudProviderInstance } from "../provider/Drivers/DevinCloudDriver.ts";
 import type * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import type * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import type * as ProjectService from "./ProjectService.ts";
@@ -44,14 +45,10 @@ export interface DevinCloudSessionsDeps {
   readonly eventSink: EventSink.EventSinkV2["Service"];
 }
 
-type DevinCloudInstance = ProviderInstance & {
-  readonly devinCloudSessions: NonNullable<ProviderInstance["devinCloudSessions"]>;
-};
-
-const isDevinCloudInstance = (instance: ProviderInstance): instance is DevinCloudInstance =>
+const isDevinCloudInstance = (instance: ProviderInstance): instance is DevinCloudProviderInstance =>
   instance.enabled &&
   instance.driverKind === DEVIN_CLOUD_DRIVER &&
-  instance.devinCloudSessions !== undefined;
+  "devinCloudSessions" in instance;
 
 export const devinCloudThreadId = (instance: ProviderInstance, sessionId: string) =>
   IdAllocator.deriveThreadFromProviderThread({
@@ -238,9 +235,6 @@ export const importDevinCloudSession = Effect.fn("DevinCloudSessions.import")(fu
   const existing = yield* existingShell;
   if (existing !== null) return toResult(existing);
 
-  if (instance.devinCloudSessions === undefined) {
-    return yield* importError("This provider cannot list Devin Cloud sessions.");
-  }
   const stored = yield* instance.devinCloudSessions
     .list({ sessionId })
     .pipe(
@@ -264,7 +258,7 @@ export const importDevinCloudSession = Effect.fn("DevinCloudSessions.import")(fu
     snapshot.models.find((candidate) => candidate.isDefault)?.slug ??
     snapshot.models[0]?.slug ??
     "default";
-  const commandId = CommandId.make(yield* deps.crypto.randomUUIDv4.pipe(Effect.orDie));
+  const commandId = CommandId.make(yield* deps.crypto.randomUUIDv4().pipe(Effect.orDie));
   const title = input.title ?? session.title ?? history.title ?? `Devin session ${sessionId}`;
   const launched = yield* Effect.result(
     deps.startup.enqueueCommand(

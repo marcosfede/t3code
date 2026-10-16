@@ -8,9 +8,8 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/process";
 
-import type * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
-import * as ServerConfig from "../../config.ts";
-import * as ServerSettings from "../../serverSettings.ts";
+import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+
 import { makeDevinCloudTextGeneration } from "../../textGeneration/DevinCloudTextGeneration.ts";
 import {
   DEVIN_CLOUD_PROVIDER,
@@ -21,28 +20,30 @@ import {
   discoverDevinCloudConfigOptions,
   listDevinCloudSessions,
   makeDevinCloudAcpRuntime,
+  type DevinNativeSession,
+  type DevinSessionPageInput,
 } from "../acp/DevinCloudAcpSupport.ts";
-import { makeDevinCloudHistory } from "../acp/DevinCloudHistory.ts";
+import { makeDevinCloudHistory, type DevinCloudSessionHistory } from "../acp/DevinCloudHistory.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import {
   buildInitialDevinCloudProviderSnapshot,
   checkDevinCloudProviderStatus,
   makeDevinCloudCatalog,
 } from "../DevinCloudProvider.ts";
-import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
+import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
 import {
   defaultProviderContinuationIdentity,
   type ProviderDriver,
   type ProviderInstance,
-} from "../ProviderDriver.ts";
-import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
-import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
+} from "@t3tools/provider-core/server/driver";
+import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
+import { makeManualOnlyProviderMaintenanceCapabilities } from "@t3tools/provider-core/server/maintenanceResolver";
 import {
   haveProviderSnapshotSettingsChanged,
   makeProviderSnapshotSettingsSource,
   type ProviderSnapshotSettings,
-} from "../providerUpdateSettings.ts";
-import { withInstanceIdentity } from "./instanceIdentity.ts";
+} from "@t3tools/provider-core/server/snapshotSettings";
+import { withInstanceIdentity } from "@t3tools/provider-core/server/instanceIdentity";
 
 const decodeDevinCloudSettings = Schema.decodeSync(DevinCloudSettings);
 const DRIVER_KIND = DEVIN_CLOUD_PROVIDER;
@@ -51,13 +52,30 @@ const MAINTENANCE = makeManualOnlyProviderMaintenanceCapabilities({
   packageName: null,
 });
 
+/** Sessions stored in the Devin Cloud account a `devinCloud` instance signs in with. */
+export interface DevinCloudSessionsAccess {
+  readonly list: (input?: DevinSessionPageInput) => Effect.Effect<
+    {
+      readonly sessions: ReadonlyArray<DevinNativeSession>;
+      readonly nextCursor: string | null;
+    },
+    ProviderDriverError
+  >;
+  /** Replays a stored session to recover its transcript. */
+  readonly history: (
+    session: DevinNativeSession,
+  ) => Effect.Effect<DevinCloudSessionHistory, ProviderDriverError>;
+}
+
+export interface DevinCloudProviderInstance extends ProviderInstance {
+  readonly devinCloudSessions: DevinCloudSessionsAccess;
+}
+
 export type DevinCloudDriverEnv =
   | DevinCloudAdapterV2DriverEnv
-  | BackgroundPolicy.BackgroundPolicy
   | ChildProcessSpawner.ChildProcessSpawner
   | Crypto.Crypto
-  | ServerConfig.ServerConfig
-  | ServerSettings.ServerSettingsService;
+  | ProviderHost.ProviderHost;
 
 export const DevinCloudDriver: ProviderDriver<DevinCloudSettings, DevinCloudDriverEnv> = {
   driverKind: DRIVER_KIND,
@@ -72,9 +90,8 @@ export const DevinCloudDriver: ProviderDriver<DevinCloudSettings, DevinCloudDriv
       const { instanceId, displayName, accentColor, environment, enabled, config } = input;
       const crypto = yield* Crypto.Crypto;
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const serverSettings = yield* ServerSettings.ServerSettingsService;
-      const { cwd } = yield* ServerConfig.ServerConfig;
-      const processEnv = mergeProviderInstanceEnvironment(environment);
+      const { cwd } = (yield* ProviderHost.ProviderHost).paths;
+      const processEnv = yield* mergeProviderInstanceEnvironment(environment);
       const continuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
         instanceId,
@@ -122,7 +139,7 @@ export const DevinCloudDriver: ProviderDriver<DevinCloudSettings, DevinCloudDriv
         Effect.provideService(Crypto.Crypto, crypto),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       );
-      const snapshotSettings = makeProviderSnapshotSettingsSource(effectiveConfig, serverSettings);
+      const snapshotSettings = yield* makeProviderSnapshotSettingsSource(effectiveConfig);
       const managedSnapshot = yield* makeManagedServerProvider<
         ProviderSnapshotSettings<DevinCloudSettings>
       >({
@@ -213,6 +230,6 @@ export const DevinCloudDriver: ProviderDriver<DevinCloudSettings, DevinCloudDriv
               Effect.mapError(driverError("Could not load the Devin Cloud session history.")),
             ),
         },
-      } satisfies ProviderInstance;
+      } satisfies DevinCloudProviderInstance;
     }),
 };

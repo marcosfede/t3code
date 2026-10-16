@@ -19,6 +19,10 @@
       "types": "./src/testing.ts",
       "import": "./src/testing.ts"
     },
+    "./server/devinAcp": {
+      "types": "./src/server/devinAcp.ts",
+      "import": "./src/server/devinAcp.ts"
+    },
     "./server/AcpRegistrySupport": {
       "types": "./src/server/AcpRegistrySupport.ts",
       "import": "./src/server/AcpRegistrySupport.ts"

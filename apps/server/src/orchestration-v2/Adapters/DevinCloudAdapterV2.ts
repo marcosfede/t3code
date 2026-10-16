@@ -3,11 +3,11 @@ import {
   DevinCloudSettings,
   ProviderDriverKind,
 } from "@t3tools/contracts";
-import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveSelfInvocation, type SelfInvocation } from "@t3tools/shared/nodeRuntime";
-import * as Crypto from "effect/Crypto";
+import type * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
+import type * as FileSystem from "effect/FileSystem";
 import type * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
@@ -15,9 +15,8 @@ import { ChildProcessSpawner } from "effect/process";
 import type * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/compat";
 
-import * as ServerConfig from "../../config.ts";
-import { makeAcpNativeLoggerFactory } from "../../provider/acp/AcpNativeLogging.ts";
-import type * as AcpSessionRuntime from "../../provider/acp/AcpSessionRuntime.ts";
+import { makeAcpNativeLoggerFactory } from "@t3tools/provider-acp/server/nativeLogging";
+import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 import {
   findDevinCloudModelOption,
   makeDevinCloudAcpRuntime,
@@ -29,25 +28,27 @@ import {
   normalizeDevinCloudUserMessage,
 } from "../../provider/acp/DevinReferences.ts";
 import { makeDevinCloudReconnect } from "../../provider/acp/DevinCloudReconnect.ts";
-import * as ProviderEventLoggers from "../../provider/ProviderEventLoggers.ts";
-import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanceEnvironment.ts";
-import * as IdAllocator from "../IdAllocator.ts";
+import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
+import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
+import type * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import type * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import type * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import {
   ProviderAdapterDriverCreateError,
   type ProviderAdapterDriver,
   type ProviderAdapterDriverCreateInput,
-} from "../ProviderAdapterDriver.ts";
+} from "@t3tools/provider-core/server/adapterDriver";
 import {
   AcpProviderCapabilitiesV2,
   makeAcpAdapterV2,
   type AcpAdapterV2Flavor,
   type AcpAdapterV2RuntimeInput,
-} from "./AcpAdapterV2.ts";
+} from "@t3tools/provider-acp/server/adapter";
 import {
   extractDevinSubagentUpdate,
   normalizeDevinSessionUpdate,
   normalizeDevinToolCall,
-} from "./DevinAcp.ts";
+} from "@t3tools/provider-acp-registry/server/devinAcp";
 
 export const DEVIN_CLOUD_PROVIDER = ProviderDriverKind.make("devinCloud");
 
@@ -58,11 +59,7 @@ export interface DevinCloudAdapterV2Options {
   readonly settings: DevinCloudSettings;
   readonly environment: NodeJS.ProcessEnv;
   readonly childProcessSpawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
-  readonly crypto: Crypto.Crypto;
   readonly selfInvocation: SelfInvocation;
-  readonly fileSystem: FileSystem.FileSystem;
-  readonly idAllocator: IdAllocator.IdAllocatorV2["Service"];
-  readonly serverConfig: ServerConfig.ServerConfig["Service"];
   readonly nativeLogging?: Parameters<typeof makeAcpAdapterV2>[0]["nativeLogging"];
   /** Observes the model and organization pickers each Cloud session advertises. */
   readonly onConfigOptions?: (
@@ -127,7 +124,9 @@ const applyDevinCloudModelSelection: NonNullable<AcpAdapterV2Flavor["applyModelS
     return model;
   });
 
-export function makeDevinCloudAdapterV2(options: DevinCloudAdapterV2Options) {
+export const makeDevinCloudAdapterV2 = Effect.fn("makeDevinCloudAdapterV2")(function* (
+  options: DevinCloudAdapterV2Options,
+) {
   const rewriteReferences = makeDevinCloudReferenceRewriter();
   const flavor: AcpAdapterV2Flavor = {
     driver: DEVIN_CLOUD_PROVIDER,
@@ -148,17 +147,13 @@ export function makeDevinCloudAdapterV2(options: DevinCloudAdapterV2Options) {
           onSessionConfigurationUpdate: (configOptions) => options.onConfigOptions!(configOptions),
         }),
   };
-  return makeAcpAdapterV2({
+  return yield* makeAcpAdapterV2({
     instanceId: options.instanceId,
     flavor,
-    crypto: options.crypto,
-    fileSystem: options.fileSystem,
-    idAllocator: options.idAllocator,
-    serverConfig: options.serverConfig,
     selfInvocation: options.selfInvocation,
     ...(options.nativeLogging ? { nativeLogging: options.nativeLogging } : {}),
   });
-}
+});
 
 export type DevinCloudAdapterV2DriverEnv =
   | ChildProcessSpawner.ChildProcessSpawner
@@ -166,26 +161,23 @@ export type DevinCloudAdapterV2DriverEnv =
   | FileSystem.FileSystem
   | IdAllocator.IdAllocatorV2
   | Path.Path
+  | McpProviderSessions.McpProviderSessions
   | ProviderEventLoggers.ProviderEventLoggers
-  | ServerConfig.ServerConfig;
+  | ProviderHost.ProviderHost;
 
 export const makeDevinCloudAdapterV2FromServices = Effect.fn("makeDevinCloudAdapterV2FromServices")(
   function* (
     input: ProviderAdapterDriverCreateInput<DevinCloudSettings>,
     hooks: Pick<DevinCloudAdapterV2Options, "onConfigOptions">,
   ) {
-    const hostEnvironment = yield* HostProcessEnvironment;
+    const hostEnvironment = yield* HostProcess.Environment;
     const providerEventLoggers = yield* ProviderEventLoggers.ProviderEventLoggers;
     const makeNativeLogger = yield* makeAcpNativeLoggerFactory();
-    return makeDevinCloudAdapterV2({
+    return yield* makeDevinCloudAdapterV2({
       instanceId: input.instanceId,
       settings: { ...input.config, enabled: input.enabled },
-      environment: mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+      environment: yield* mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
       childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
-      crypto: yield* Crypto.Crypto,
-      fileSystem: yield* FileSystem.FileSystem,
-      idAllocator: yield* IdAllocator.IdAllocatorV2,
-      serverConfig: yield* ServerConfig.ServerConfig,
       selfInvocation: yield* resolveSelfInvocation(),
       nativeLogging: (threadId) =>
         makeNativeLogger({

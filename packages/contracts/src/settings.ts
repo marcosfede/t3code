@@ -822,7 +822,6 @@ export const DevinCloudSettings = makeProviderSettingsSchema(
 );
 export type DevinCloudSettings = typeof DevinCloudSettings.Type;
 
-
 export const UsageLimitSourceConfig = Schema.Struct({
   kind: Schema.Literal("cliproxy"),
   label: Schema.optional(TrimmedNonEmptyString),

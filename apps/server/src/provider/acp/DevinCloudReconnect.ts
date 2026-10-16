@@ -16,7 +16,7 @@ import type {
   AcpSessionRuntimeEvent,
   AcpSessionRuntimeOptions,
   AcpSessionRuntimeStartResult,
-} from "./AcpSessionRuntime.ts";
+} from "@t3tools/provider-acp/server/AcpSessionRuntime";
 
 type Runtime = AcpSessionRuntime["Service"];
 type Notification = AcpCompat.SessionNotification;
