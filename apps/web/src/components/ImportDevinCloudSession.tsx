@@ -6,7 +6,11 @@ import { ArrowLeftIcon, CloudIcon, FolderIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { devinCloudSessionImport } from "../state/agentSessions";
-import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
+import {
+  useEnvironmentProviders,
+  useEnvironments,
+  usePrimaryEnvironmentId,
+} from "../state/environments";
 import { primaryServerKeybindingsAtom, primaryServerProvidersAtom } from "../state/server";
 import { useAtomCommand } from "../state/use-atom-command";
 import type { Project } from "../types";
@@ -37,12 +41,13 @@ export function ImportDevinCloudSession(props: {
     };
   }, []);
   const { environments } = useEnvironments();
+  const providersByEnvironment = useEnvironmentProviders();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const primaryProviders = useAtomValue(primaryServerProvidersAtom);
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const environment = environments.find((entry) => entry.environmentId === project?.environmentId);
   const providers = (
-    environment?.serverConfig?.providers ??
+    (project ? providersByEnvironment.get(project.environmentId) : undefined) ??
     (project?.environmentId === primaryEnvironmentId ? primaryProviders : [])
   ).filter((provider) => provider.driver === "devinCloud" && provider.enabled);
   const provider =

@@ -655,31 +655,31 @@ export function EnvironmentProviderSettings({
   const defaultProviderHealthRefreshIntervalSeconds = durationToSeconds(providerHealthPreset);
 
   const refreshProviders = (instanceId?: ProviderInstanceId) => {
-      if (refreshingRef.current || !readEnvironmentScope(environmentId, AuthOrchestrationReadScope))
-        return;
-      refreshingRef.current = true;
-      setIsRefreshingProviders(true);
-      void (async () => {
-        const result = await refreshServerProviders({
-          environmentId,
-          input: { refreshModels: true, ...(instanceId ? { instanceId } : {}) },
+    if (refreshingRef.current || !readEnvironmentScope(environmentId, AuthOrchestrationReadScope))
+      return;
+    refreshingRef.current = true;
+    setIsRefreshingProviders(true);
+    void (async () => {
+      const result = await refreshServerProviders({
+        environmentId,
+        input: { refreshModels: true, ...(instanceId ? { instanceId } : {}) },
+      });
+      refreshingRef.current = false;
+      setIsRefreshingProviders(false);
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        toastManager.add({
+          type: "error",
+          title: "Could not refresh provider choices",
+          description: "Check the provider sign-in and try again.",
         });
-        refreshingRef.current = false;
-        setIsRefreshingProviders(false);
-        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-          toastManager.add({
-            type: "error",
-            title: "Could not refresh provider choices",
-            description: "Check the provider sign-in and try again.",
-          });
-          console.warn("Failed to refresh providers", {
-            operation: "refresh-providers",
-            environmentId,
-            ...safeErrorLogAttributes(squashAtomCommandFailure(result)),
-          });
-        }
-      })();
-    };
+        console.warn("Failed to refresh providers", {
+          operation: "refresh-providers",
+          environmentId,
+          ...safeErrorLogAttributes(squashAtomCommandFailure(result)),
+        });
+      }
+    })();
+  };
 
   const runProviderUpdate = useStableCallback(
     async (
@@ -929,6 +929,9 @@ export function EnvironmentProviderSettings({
     },
   );
 
+  const loadOrganizations = useStableCallback((instanceId: ProviderInstanceId) =>
+    refreshProviders(instanceId),
+  );
   const stableUpdateModelPreferences = useStableCallback(updateModelPreferences);
   const stableToggleModelFavorite = useStableCallback(toggleModelFavorite);
   const actions: ProviderInstanceRowActions = {
@@ -942,6 +945,7 @@ export function EnvironmentProviderSettings({
     updateModelPreferences: stableUpdateModelPreferences,
     toggleModelFavorite: stableToggleModelFavorite,
     selectInstance: setSelectedInstanceId,
+    loadOrganizations,
   };
   // resolveModelPreferences falls back to a fresh `[]`; keep it stable for the rows.
   const favorites = settings.favorites.length > 0 ? settings.favorites : NO_FAVORITES;
@@ -960,7 +964,6 @@ export function EnvironmentProviderSettings({
         explicitInstance={row.explicitInstance}
         isDefault={row.isDefault}
         isDirty={row.isDirty === true}
-        onLoadOrganizations={() => refreshProviders(row.instanceId)}
         isLoadingOrganizations={isRefreshingProviders}
         mode={mode}
         selected={mode === "list" && selectedRow?.instanceId === row.instanceId}
@@ -1230,6 +1233,7 @@ interface ProviderInstanceRowActions {
   readonly updateModelPreferences: ReturnType<typeof useUpdateEnvironmentModelPreferences>;
   readonly toggleModelFavorite: ReturnType<typeof useToggleEnvironmentModelFavorite>;
   readonly selectInstance: (instanceId: ProviderInstanceId) => void;
+  readonly loadOrganizations: (instanceId: ProviderInstanceId) => void;
 }
 
 const NO_MODELS: ReadonlyArray<string> = [];
@@ -1248,6 +1252,7 @@ function ProviderInstanceRow({
   explicitInstance,
   isDefault,
   isDirty,
+  isLoadingOrganizations,
   mode,
   selected,
   readOnly,
@@ -1268,6 +1273,7 @@ function ProviderInstanceRow({
   readonly explicitInstance: ProviderInstanceConfig | undefined;
   readonly isDefault: boolean;
   readonly isDirty: boolean;
+  readonly isLoadingOrganizations: boolean;
   readonly mode: "list" | "editor";
   readonly selected: boolean;
   readonly readOnly: boolean;
@@ -1334,6 +1340,8 @@ function ProviderInstanceRow({
       mode={mode}
       selected={selected}
       onSelect={mode === "list" ? () => actions.selectInstance(instanceId) : undefined}
+      onLoadOrganizations={() => actions.loadOrganizations(instanceId)}
+      isLoadingOrganizations={isLoadingOrganizations}
       readOnly={readOnly}
       runtime={
         mode === "editor" && codexSetupMode === "managed" ? (

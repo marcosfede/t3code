@@ -6,7 +6,7 @@ import { Link, useLocation, useNavigate } from "@tanstack/react-router";
 import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
 import { usePullRequestsSupported } from "../../state/environments";
-import { useEnvironments } from "../../state/environments";
+import { useEnvironmentProviders } from "../../state/environments";
 import { DevinIcon } from "../Icons";
 import { T3Wordmark } from "../T3Wordmark";
 import {
@@ -166,11 +166,8 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
     select: (location) => isSidebarUtilityPage(location.pathname),
   });
   const pullRequestsSupported = usePullRequestsSupported();
-  const { environments } = useEnvironments();
-  const devinSupported = environments.some((environment) =>
-    environment.serverConfig?.providers.some(
-      (provider) => provider.enabled && provider.driver === "devinCloud",
-    ),
+  const devinSupported = [...useEnvironmentProviders().values()].some((providers) =>
+    providers.some((provider) => provider.enabled && provider.driver === "devinCloud"),
   );
   const closeMobileSidebar = () => {
     if (isMobile) {

@@ -2043,10 +2043,8 @@ function OpenCommandPaletteDialog(props: {
   }
 
   if (
-    environments.some((environment) =>
-      environment.serverConfig?.providers.some(
-        (provider) => provider.enabled && provider.driver === "devinCloud",
-      ),
+    [...providersByEnvironment.values()].some((providers) =>
+      providers.some((provider) => provider.enabled && provider.driver === "devinCloud"),
     )
   ) {
     actionItems.push({

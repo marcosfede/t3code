@@ -7,8 +7,9 @@ import {
   type ServerProvider,
 } from "@t3tools/contracts";
 import { act, type ComponentProps } from "react";
-import { create, type ReactTestRenderer } from "react-test-renderer";
+import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { userEvent } from "vite-plus/test/browser";
 import type { CommandPaletteContent } from "./CommandPaletteContent";
 import type { CommandPaletteResults } from "./CommandPaletteResults";
 import type { Project } from "../types";
@@ -21,18 +22,33 @@ const state = vi.hoisted(() => ({
   connected: true,
   providersAtom: Symbol("providers"),
 }));
-vi.mock("../state/use-atom-command", () => ({ useAtomCommand: () => state.importSession }));
-vi.mock("../state/agentSessions", () => ({ devinCloudSessionImport: {} }));
-vi.mock("../state/entities", () => ({ waitForThreadShell: () => Promise.resolve(true) }));
-vi.mock("../state/server", () => ({
+vi.mock("../state/use-atom-command", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  useAtomCommand: () => state.importSession,
+}));
+vi.mock("../state/agentSessions", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  devinCloudSessionImport: {},
+}));
+vi.mock("../state/entities", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  waitForThreadShell: () => Promise.resolve(true),
+}));
+vi.mock("../state/server", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
   primaryServerProvidersAtom: state.providersAtom,
   primaryServerKeybindingsAtom: Symbol("keybindings"),
 }));
-vi.mock("@effect/atom-react", () => ({
+vi.mock("@effect/atom-react", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
   useAtomValue: (atom: unknown) => (atom === state.providersAtom ? [] : {}),
 }));
-vi.mock("@tanstack/react-router", () => ({ useNavigate: () => state.navigate }));
-vi.mock("../state/environments", () => ({
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  useNavigate: () => state.navigate,
+}));
+vi.mock("../state/environments", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
   usePrimaryEnvironmentId: () => "local",
   useEnvironments: () => ({
     environments: [
@@ -40,12 +56,13 @@ vi.mock("../state/environments", () => ({
         environmentId: "remote",
         label: "Remote",
         connection: { phase: state.connected ? "connected" : "disconnected" },
-        serverConfig: { providers: state.providers },
       },
     ],
   }),
+  useEnvironmentProviders: () => new Map([["remote", state.providers]]),
 }));
-vi.mock("./CommandPaletteContent", () => ({
+vi.mock("./CommandPaletteContent", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
   CommandPaletteContent: (
     props: Omit<ComponentProps<typeof CommandPaletteContent>, "onValueChange"> & {
       onValueChange: (value: string) => void;
@@ -63,7 +80,8 @@ vi.mock("./CommandPaletteContent", () => ({
     </div>
   ),
 }));
-vi.mock("./CommandPaletteResults", () => ({
+vi.mock("./CommandPaletteResults", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
   CommandPaletteResults: (props: ComponentProps<typeof CommandPaletteResults>) => (
     <div>
       {props.groups.flatMap((group) =>
@@ -102,7 +120,8 @@ const provider: ServerProvider = {
   slashCommands: [],
   skills: [],
 };
-let renderer: ReactTestRenderer;
+let container: HTMLDivElement;
+let root: Root;
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -113,14 +132,18 @@ beforeEach(() => {
     _tag: "Success",
     value: { threadId: ThreadId.make("imported-thread") },
   });
+  container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
 });
 afterEach(async () => {
-  if (renderer) await act(async () => renderer.unmount());
+  await act(async () => root.unmount());
+  container.remove();
   vi.unstubAllGlobals();
 });
 const mount = async () => {
   await act(async () => {
-    renderer = create(
+    root.render(
       <ImportDevinCloudSession
         projects={[project]}
         initialProject={project}
@@ -130,17 +153,17 @@ const mount = async () => {
     );
   });
 };
+const input = () => container.querySelector("input")!;
+const alertText = () => container.querySelector('[role="alert"]')?.textContent ?? "";
 const type = async (text: string) => {
-  await act(async () =>
-    renderer.root.findByType("input").props.onChange({ target: { value: text } }),
-  );
+  await act(async () => userEvent.fill(input(), text));
 };
-const enter = () =>
-  renderer.root.findByType("input").props.onKeyDown({
-    key: "Enter",
-    nativeEvent: { isComposing: false },
-    preventDefault: vi.fn(),
+const enter = async (times = 1) => {
+  await act(async () => {
+    input().focus();
+    await userEvent.keyboard("{Enter}".repeat(times));
   });
+};
 
 describe("ImportDevinCloudSession", () => {
   it.each(["devinCloud"] as const)(
@@ -149,13 +172,11 @@ describe("ImportDevinCloudSession", () => {
       state.providers = [{ ...provider, driver: ProviderDriverKind.make(driver) }];
       await mount();
       await type("https://example.com/sessions/wrong");
-      await act(async () => enter());
+      await enter();
       expect(state.importSession).not.toHaveBeenCalled();
-      expect(renderer.root.findByProps({ role: "alert" }).children.join("")).toContain(
-        "Paste a Devin",
-      );
+      expect(alertText()).toContain("Paste a Devin");
       await type("https://app.devin.ai/sessions/session-1");
-      await act(async () => enter());
+      await enter();
       expect(state.importSession).toHaveBeenCalledWith({
         environmentId: "remote",
         input: {
@@ -181,10 +202,7 @@ describe("ImportDevinCloudSession", () => {
     );
     await mount();
     await type("session-1");
-    await act(async () => {
-      enter();
-      enter();
-    });
+    await enter(2);
     expect(state.importSession).toHaveBeenCalledOnce();
     expect(state.navigate).not.toHaveBeenCalled();
     await act(async () =>
@@ -204,10 +222,10 @@ describe("ImportDevinCloudSession", () => {
     ];
     state.connected = false;
     await mount();
-    await act(async () => renderer.root.findAllByType("button")[1]!.props.onClick());
+    await act(async () => userEvent.click(container.querySelectorAll("button")[1]!));
     await type("session-1");
-    await act(async () => enter());
+    await enter();
     expect(state.importSession).not.toHaveBeenCalled();
-    expect(renderer.root.findByProps({ role: "alert" }).children.join("")).toContain("Connect");
+    expect(alertText()).toContain("Connect");
   });
 });

@@ -27,14 +27,14 @@ import {
   SearchIcon,
   type LucideIcon,
 } from "lucide-react";
-import { memo, useContext, useMemo, useState } from "react";
+import { memo, useContext, useState } from "react";
 
 import { isElectron } from "../../env";
 import { readLocalApi } from "../../localApi";
 import { cn } from "../../lib/utils";
 import { devinCloudSessionImport, devinSessionList } from "../../state/agentSessions";
 import { useProjects } from "../../state/entities";
-import { useEnvironments } from "../../state/environments";
+import { useEnvironmentProviders, useEnvironments } from "../../state/environments";
 import { useDebouncedValue } from "../../state/queries";
 import { formatEnvironmentQueryError } from "../../state/query";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -112,78 +112,85 @@ function sessionStatusPresentation(session: Pick<DevinSessionSummary, "status">)
 
 const SEARCH_DEBOUNCE_MS = 250;
 
+type DevinSessionPage = Record<string, DevinSessionListInput>;
+
+function makeDevinSessionLists(
+  key: string,
+  environmentIds: ReadonlyArray<EnvironmentId>,
+  pages: DevinSessionPage[],
+) {
+  return {
+    key,
+    pages,
+    atom: Atom.make((get) =>
+      environmentIds.map((environmentId) => {
+        const atoms = pages.flatMap((page) => {
+          const input = page[environmentId];
+          return input ? [devinSessionList({ environmentId, input })] : [];
+        });
+        const results = atoms.map((atom) => get(atom));
+        const last = results.at(-1)!;
+        const data = results.flatMap((result) => {
+          const value = Option.getOrNull(AsyncResult.value(result));
+          return value ? [value] : [];
+        });
+        const latest = Option.getOrNull(AsyncResult.value(last));
+        const sessions = new Map(
+          data.flatMap((page) =>
+            page.sessions.map(
+              (session) => [`${session.providerInstanceId}:${session.sessionId}`, session] as const,
+            ),
+          ),
+        );
+        return {
+          environmentId,
+          data: data.length
+            ? {
+                sessions: [...sessions.values()],
+                failures: data.flatMap((page) => page.failures),
+              }
+            : null,
+          nextCursors: latest?.nextCursors ?? [],
+          error: last._tag === "Failure" ? formatEnvironmentQueryError(last.cause) : null,
+          isPending: results.some((result) => result.waiting || result._tag === "Initial"),
+        };
+      }),
+    ),
+  };
+}
+
 /** Keep loaded pages visible while fetching the next page. */
 function useDevinSessionLists(
   environmentIds: ReadonlyArray<EnvironmentId>,
   input: Omit<DevinSessionListInput, "cursors">,
 ) {
   const registry = useContext(RegistryContext);
-  type Page = Record<string, DevinSessionListInput>;
   const key = JSON.stringify([environmentIds, input]);
-  const firstPage = () => Object.fromEntries(environmentIds.map((id) => [id, input]));
-  const [pagination, setPagination] = useState<{ key: string; pages: Page[] }>(() => ({
-    key,
-    pages: [firstPage()],
-  }));
-  const pages = pagination.key === key ? pagination.pages : [firstPage()];
-  if (pagination.key !== key) setPagination({ key, pages });
-  const listsAtom = useMemo(
-    () =>
-      Atom.make((get) =>
-        environmentIds.map((environmentId) => {
-          const atoms = pages.flatMap((page) => {
-            const input = page[environmentId];
-            return input ? [devinSessionList({ environmentId, input })] : [];
-          });
-          const results = atoms.map((atom) => get(atom));
-          const last = results.at(-1)!;
-          const data = results.flatMap((result) => {
-            const value = Option.getOrNull(AsyncResult.value(result));
-            return value ? [value] : [];
-          });
-          const latest = Option.getOrNull(AsyncResult.value(last));
-          const sessions = new Map(
-            data.flatMap((page) =>
-              page.sessions.map(
-                (session) =>
-                  [`${session.providerInstanceId}:${session.sessionId}`, session] as const,
-              ),
-            ),
-          );
-          return {
-            environmentId,
-            data: data.length
-              ? {
-                  sessions: [...sessions.values()],
-                  failures: data.flatMap((page) => page.failures),
-                }
-              : null,
-            nextCursors: latest?.nextCursors ?? [],
-            error: last._tag === "Failure" ? formatEnvironmentQueryError(last.cause) : null,
-            isPending: results.some((result) => result.waiting || result._tag === "Initial"),
-          };
-        }),
-      ),
-    [environmentIds, pages],
+  const firstPage = (): DevinSessionPage =>
+    Object.fromEntries(environmentIds.map((id) => [id, input]));
+  const [pagination, setPagination] = useState(() =>
+    makeDevinSessionLists(key, environmentIds, [firstPage()]),
   );
-  const lists = useAtomValue(listsAtom);
+  const current =
+    pagination.key === key ? pagination : makeDevinSessionLists(key, environmentIds, [firstPage()]);
+  if (current !== pagination) setPagination(current);
+  const lists = useAtomValue(current.atom);
   return {
     lists,
     loadMore: () =>
-      setPagination({
-        key,
-        pages: [
-          ...pages,
+      setPagination(
+        makeDevinSessionLists(key, environmentIds, [
+          ...current.pages,
           Object.fromEntries(
             lists
               .filter((list) => list.nextCursors.length > 0)
               .map((list) => [list.environmentId, { ...input, cursors: list.nextCursors }]),
           ),
-        ],
-      }),
+        ]),
+      ),
     refresh: () => {
       const page = firstPage();
-      setPagination({ key, pages: [page] });
+      setPagination(makeDevinSessionLists(key, environmentIds, [page]));
       for (const environmentId of environmentIds) {
         registry.refresh(devinSessionList({ environmentId, input: page[environmentId]! }));
       }
@@ -194,35 +201,31 @@ function useDevinSessionLists(
 /** Lists the sessions of every Devin Cloud provider instance and opens them in T3. */
 export function DevinSessionsPage() {
   const { environments } = useEnvironments();
+  const providersByEnvironment = useEnvironmentProviders();
   const projects = useProjects();
   const [query, setQuery] = useState("");
-  const [filters, setFilters] = useState(NO_DEVIN_SESSION_FILTERS);
+  const [filters, setFilterSelection] = useState(NO_DEVIN_SESSION_FILTERS);
   // Presets resolve when chosen; resolving per render would refetch every render.
-  const listFilters = useMemo(() => devinSessionListFilters(filters, new Date()), [filters]);
+  const [listFilters, setListFilters] = useState(() =>
+    devinSessionListFilters(NO_DEVIN_SESSION_FILTERS, new Date()),
+  );
+  const setFilters = (next: typeof filters) => {
+    setFilterSelection(next);
+    setListFilters(devinSessionListFilters(next, new Date()));
+  };
   const trimmedQuery = query.trim();
   const sentQuery = useDebouncedValue(trimmedQuery, SEARCH_DEBOUNCE_MS);
 
-  const devinEnvironments = useMemo(
-    () =>
-      environments.filter(
-        (environment) =>
-          environment.connection.phase === "connected" &&
-          environment.serverConfig?.providers.some(
-            (provider) => provider.enabled && DEVIN_DRIVERS.has(provider.driver),
-          ),
-      ),
-    [environments],
+  const devinEnvironments = environments.filter(
+    (environment) =>
+      environment.connection.phase === "connected" &&
+      providersByEnvironment
+        .get(environment.environmentId)
+        ?.some((provider) => provider.enabled && DEVIN_DRIVERS.has(provider.driver)),
   );
-  const environmentIds = useMemo(
-    () => devinEnvironments.map((environment) => environment.environmentId),
-    [devinEnvironments],
-  );
-  const environmentLabels = useMemo(
-    () =>
-      new Map(
-        devinEnvironments.map((environment) => [environment.environmentId, environment.label]),
-      ),
-    [devinEnvironments],
+  const environmentIds = devinEnvironments.map((environment) => environment.environmentId);
+  const environmentLabels = new Map(
+    devinEnvironments.map((environment) => [environment.environmentId, environment.label]),
   );
   const filtered = countDevinSessionFilters(filters) > 0;
   const { lists, loadMore, refresh } = useDevinSessionLists(environmentIds, {
@@ -234,25 +237,19 @@ export function DevinSessionsPage() {
   const hasMore = lists.some((list) => list.nextCursors.length > 0);
   const showEnvironment = environmentIds.length > 1;
 
-  const sessions = useMemo(
-    () =>
-      lists.flatMap((list) =>
-        (list.data?.sessions ?? []).map((session): ListedSession => ({
-          ...session,
-          environmentId: list.environmentId,
-          key: `${list.environmentId}:${session.providerInstanceId}:${session.sessionId}`,
-        })),
-      ),
-    [lists],
+  const sessions = lists.flatMap((list) =>
+    (list.data?.sessions ?? []).map((session): ListedSession => ({
+      ...session,
+      environmentId: list.environmentId,
+      key: `${list.environmentId}:${session.providerInstanceId}:${session.sessionId}`,
+    })),
   );
-  const groups = useMemo(() => {
-    const visible = [...sessions].sort((a, b) =>
-      (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""),
-    );
-    return [{ key: "cloud", label: "Cloud", Icon: CloudIcon, sessions: visible }].filter(
-      (group) => group.sessions.length > 0,
-    );
-  }, [sessions]);
+  const visibleSessions = [...sessions].sort((a, b) =>
+    (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""),
+  );
+  const groups = [
+    { key: "cloud", label: "Cloud", Icon: CloudIcon, sessions: visibleSessions },
+  ].filter((group) => group.sessions.length > 0);
   const shownCount = groups.reduce((count, group) => count + group.sessions.length, 0);
   const loadedOnce = lists.some((list) => list.data !== null);
   const listErrors = lists.flatMap((list) => (list.error ? [list.error] : []));
@@ -261,15 +258,12 @@ export function DevinSessionsPage() {
       (failure) => `${failure.providerInstanceId}: ${failure.detail}`,
     ),
   );
-  const projectsByEnvironment = useMemo(() => {
-    const byEnvironment = new Map<EnvironmentId, Array<EnvironmentProject>>();
-    for (const project of projects) {
-      const entries = byEnvironment.get(project.environmentId) ?? [];
-      entries.push(project);
-      byEnvironment.set(project.environmentId, entries);
-    }
-    return byEnvironment;
-  }, [projects]);
+  const projectsByEnvironment = new Map<EnvironmentId, Array<EnvironmentProject>>();
+  for (const project of projects) {
+    const entries = projectsByEnvironment.get(project.environmentId) ?? [];
+    entries.push(project);
+    projectsByEnvironment.set(project.environmentId, entries);
+  }
 
   const listBody =
     environmentIds.length === 0 ? (
@@ -450,10 +444,7 @@ const DevinSessionRow = memo(function DevinSessionRow({
   const openSession = useAtomCommand(devinCloudSessionImport, { reportFailure: false });
   const [pending, setPending] = useState(false);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
-  const suggested = useMemo(
-    () => suggestDevinSessionProject(session, projects),
-    [session, projects],
-  );
+  const suggested = suggestDevinSessionProject(session, projects);
   const status = sessionStatusPresentation(session);
   const repository = session.repositories[0];
   const sessionUrl = session.url;
