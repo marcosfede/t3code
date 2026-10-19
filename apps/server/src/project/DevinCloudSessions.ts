@@ -16,26 +16,28 @@ import {
   type DevinSessionListResult,
   type DevinSessionSummary,
 } from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 
-import type * as EventSink from "../orchestration-v2/EventSink.ts";
+import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type { DevinCloudHistoryMessage } from "../provider/acp/DevinCloudHistory.ts";
-import type * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
-import type * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import type { DevinCloudProviderInstance } from "../provider/Drivers/DevinCloudDriver.ts";
-import type * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
-import type * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
-import type * as ProjectService from "./ProjectService.ts";
+import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
+import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
+import * as ProjectService from "./ProjectService.ts";
 
 const DEVIN_CLOUD_DRIVER = ProviderDriverKind.make("devinCloud");
 
-export interface DevinCloudSessionsDeps {
+interface DevinCloudSessionsDeps {
   readonly providerInstances: ProviderInstanceRegistry.ProviderInstanceRegistry["Service"];
   readonly projectService: ProjectService.ProjectService["Service"];
   readonly threadManagement: ThreadManagementService.ThreadManagementService["Service"];
@@ -50,7 +52,7 @@ const isDevinCloudInstance = (instance: ProviderInstance): instance is DevinClou
   instance.driverKind === DEVIN_CLOUD_DRIVER &&
   "devinCloudSessions" in instance;
 
-export const devinCloudThreadId = (instance: ProviderInstance, sessionId: string) =>
+const devinCloudThreadId = (instance: ProviderInstance, sessionId: string) =>
   IdAllocator.deriveThreadFromProviderThread({
     driver: instance.driverKind,
     providerInstanceId: instance.instanceId,
@@ -58,7 +60,7 @@ export const devinCloudThreadId = (instance: ProviderInstance, sessionId: string
   });
 
 /** Lists stored sessions across every enabled Devin Cloud instance, newest first. */
-export const listDevinCloudSessions = Effect.fn("DevinCloudSessions.list")(function* (
+const listDevinCloudSessions = Effect.fn("DevinCloudSessions.list")(function* (
   deps: {
     readonly providerInstances: Pick<DevinCloudSessionsDeps["providerInstances"], "listInstances">;
   },
@@ -202,7 +204,7 @@ function historyEvents(
  * Opens a Devin Cloud session as a T3 thread. The thread id derives from the
  * session id, so importing the same session again returns the existing thread.
  */
-export const importDevinCloudSession = Effect.fn("DevinCloudSessions.import")(function* (
+const importDevinCloudSession = Effect.fn("DevinCloudSessions.import")(function* (
   deps: DevinCloudSessionsDeps,
   input: DevinCloudSessionImportInput,
 ) {
@@ -305,3 +307,31 @@ export const importDevinCloudSession = Effect.fn("DevinCloudSessions.import")(fu
   }
   return { threadId } satisfies DevinCloudSessionImportResult;
 });
+
+export class DevinCloudSessions extends Context.Service<
+  DevinCloudSessions,
+  {
+    readonly list: (input: DevinSessionListInput) => Effect.Effect<DevinSessionListResult>;
+    readonly importSession: (
+      input: DevinCloudSessionImportInput,
+    ) => Effect.Effect<DevinCloudSessionImportResult, DevinCloudSessionImportError>;
+  }
+>()("t3/project/DevinCloudSessions") {}
+
+const make = Effect.gen(function* () {
+  const deps: DevinCloudSessionsDeps = {
+    providerInstances: yield* ProviderInstanceRegistry.ProviderInstanceRegistry,
+    projectService: yield* ProjectService.ProjectService,
+    threadManagement: yield* ThreadManagementService.ThreadManagementService,
+    threadLaunch: yield* ThreadLaunchService.ThreadLaunchService,
+    startup: yield* ServerRuntimeStartup.ServerRuntimeStartup,
+    crypto: yield* Crypto.Crypto,
+    eventSink: yield* EventSink.EventSinkV2,
+  };
+  return DevinCloudSessions.of({
+    list: (input) => listDevinCloudSessions(deps, input),
+    importSession: (input) => importDevinCloudSession(deps, input),
+  });
+});
+
+export const layer = Layer.effect(DevinCloudSessions, make);

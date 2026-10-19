@@ -119,7 +119,6 @@ import * as CommandOutputHub from "./orchestration-v2/CommandOutputHub.ts";
 import * as McpAppRequests from "./mcpApps/McpAppRequests.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
 import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts";
-import * as EventSink from "./orchestration-v2/EventSink.ts";
 import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
@@ -1199,7 +1198,7 @@ const layerWsRpc = (
       };
       const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
       const commandOutputHub = yield* CommandOutputHub.CommandOutputHub;
-      const eventSink = yield* EventSink.EventSinkV2;
+      const devinCloudSessions = yield* DevinCloudSessions.DevinCloudSessions;
       const providerSessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
       const secretRequests = yield* SecretRequests.SecretRequests;
@@ -2667,21 +2666,9 @@ const layerWsRpc = (
         [WS_METHODS.agentSessionsScan]: () => agentSessionScanner.scan,
         [WS_METHODS.agentSessionsImport]: (input) =>
           agentSessionImporter.importRecentAgentThreads(input),
-        [WS_METHODS.agentSessionsListDevin]: (input) =>
-          DevinCloudSessions.listDevinCloudSessions({ providerInstances }, input),
+        [WS_METHODS.agentSessionsListDevin]: (input) => devinCloudSessions.list(input),
         [WS_METHODS.agentSessionsImportDevinCloud]: (input) =>
-          DevinCloudSessions.importDevinCloudSession(
-            {
-              providerInstances,
-              projectService,
-              threadManagement,
-              threadLaunch,
-              startup,
-              crypto,
-              eventSink,
-            },
-            input,
-          ),
+          devinCloudSessions.importSession(input),
         [WS_METHODS.assetsCreateUrl]: (input) =>
           Effect.gen(function* () {
             const path = yield* Path.Path;
@@ -3187,6 +3174,7 @@ export const layer = Layer.unwrap(
               Layer.provide(DefectReporter.layer),
               Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),
               Layer.provide(AgentSessionScanner.layer),
+              Layer.provide(DevinCloudSessions.layer),
               Layer.provide(ProviderMaintenanceRunner.layer),
               Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),
               // One server-lifetime service means clients share the same PR caches, and a WS
